@@ -1,0 +1,15 @@
+# Written by deploy/setup_server.sh. Caddy obtains and renews the HTTPS certificate automatically.
+{{DOMAIN}} {
+	encode gzip
+
+	# The first admin is created from the server shell (run.py create-admin), never via the web.
+	respond /setup* 404
+
+	# WebSockets (live dashboard) are proxied automatically; X-Forwarded-For/Proto are set.
+	reverse_proxy 127.0.0.1:8000
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+}

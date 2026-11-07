@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Audit log{% endblock %}
+{% block content %}
+<h1>Audit log</h1>
+<form method="get" class="filters">
+  <div class="field"><label>From</label><input type="date" name="day_from" value="{{ day_from }}"></div>
+  <div class="field"><label>To</label><input type="date" name="day_to" value="{{ day_to }}"></div>
+  <div class="field"><label>User</label><input type="text" name="username" value="{{ q.get('username', '') }}"></div>
+  <div class="field"><label>Action contains</label><input type="text" name="action" value="{{ q.get('action', '') }}"></div>
+  <button type="submit">Filter</button>
+</form>
+<div class="panel">
+<table><thead><tr><th>Time</th><th>User</th><th>Action</th><th>Target</th><th>IP</th><th>Details</th></tr></thead>
+<tbody>{% for r in rows %}<tr><td class="small nowrap">{{ r.ts|dt('%d-%b-%Y %H:%M:%S') }}</td><td>{{ r.username }}</td><td><b>{{ r.action }}</b></td><td>{{ r.target }}</td><td class="small">{{ r.ip or '' }}</td>
+  <td>{% if r.details %}<details><summary>{{ r.details|length }} item(s)</summary><pre>{{ r.details|tojson_pretty }}</pre></details>{% endif %}</td></tr>
+{% else %}<tr><td colspan="6" class="muted">No entries.</td></tr>{% endfor %}</tbody></table>
+</div>
+{% endblock %}

@@ -1,0 +1,347 @@
+# ROLE
+You are a senior Python engineer specializing in algorithmic trading platforms for Indian
+markets. Build a production-quality, multi-strategy, multi-broker algo trading platform in
+Python with a secure web UI. The first strategy and first broker to implement are below;
+the architecture must make adding more of each straightforward.
+
+# 1. PLATFORM ARCHITECTURE
+
+## Core concepts
+- **Strategy template**: a Python class implementing the strategy logic, registered in a
+  plugin registry. Each template declares its settings as a Pydantic model (field types,
+  defaults, min/max, descriptions). The UI form is generated from this schema automatically.
+- **Strategy instance**: a saved configuration of a template, with:
+  name, template, parameters, linked broker account, mode (paper/live),
+  enabled/disabled switch, its own risk limits, and notes.
+  Users can create several instances of the same template with different parameters
+  and different brokers (e.g. "NIFTY Breakout – Angel A/c 1 – Live" and
+  "NIFTY Breakout – Zerodha – Paper").
+- **Broker account**: a saved, encrypted set of credentials for one broker login.
+  Multiple accounts per broker are allowed.
+- **Broker adapter**: one class per broker implementing a common interface.
+
+## Broker adapter interface (normalized models in, normalized models out)
+login(), refresh_session(), is_connected(), get_profile(), get_funds(),
+load_instruments(), resolve_symbol(normalized_instrument) -> broker symbol/token,
+place_order(), modify_order(), cancel_order(), get_order_book(), get_positions(),
+get_ltp(), get_historical_candles(), subscribe_ticks(), on_order_update().
+- Use normalized Order, Position, Instrument, Tick, Candle models across the app;
+  each adapter maps to and from its broker's format.
+- Implement **Angel One (SmartAPI)** fully: `smartapi-python` (`SmartConnect`), PIN + TOTP
+  login via `pyotp`, `SmartWebSocketV2`, scrip-master download, rate-limit throttling.
+- Include a **Paper broker adapter** (simulated fills on live prices) that any instance
+  can use in paper mode.
+- Leave documented stub adapters with the same interface for Zerodha (Kite Connect),
+  Upstox, Dhan and Fyers, raising NotImplementedError, plus a short guide in the README
+  on adding a new broker.
+
+## Market data
+- One shared market-data service: a designated "data feed" broker account (chosen in
+  Global Settings) streams ticks; all strategy instances subscribe to it, so the same
+  symbol is never streamed twice. Fall back to another connected account if the feed drops.
+- Candle builder (configurable timeframes) from ticks, cross-checked against the
+  historical candle API.
+- Orders always go through each instance's own linked broker account.
+
+## Strategy runtime
+- A Strategy Manager runs each enabled instance as an isolated asyncio task;
+  one instance crashing must not affect others (catch, log, alert, mark instance as ERROR).
+- Toggling an instance on/off from the UI takes effect without restarting the app.
+- Disabling an instance with an open position asks the user: "Exit position now" or
+  "Let the current trade finish, then stop".
+- Parameter edits on a running instance apply from the next trade slot, never mid-trade.
+- Kill switches: per instance, per broker account, and global (cancel all orders and
+  exit all positions).
+
+# 2. WEB APPLICATION
+
+Stack: FastAPI backend, Jinja2 templates + HTMX (or a React/Vite frontend if you prefer;
+state which), SQLAlchemy + Alembic, SQLite by default with optional PostgreSQL,
+WebSocket/SSE for live updates.
+
+## Pages
+1. **Login page**
+   - App users (separate from broker logins) with username + password,
+     passwords hashed with argon2 or bcrypt.
+   - Optional TOTP two-factor for app login.
+   - Session cookies (HttpOnly, Secure, SameSite), CSRF protection, login rate limiting,
+     lockout after repeated failures, auto logout on inactivity.
+   - First-run setup screen to create the admin user.
+   - Roles: Admin (everything) and Viewer (read-only).
+2. **Dashboard**
+   - All instances with status (Running / Stopped / Waiting / In trade / Error),
+     enable/disable toggle, mode, broker, today's trades and P&L.
+   - Open positions across all brokers, combined and per-account P&L.
+   - Global kill switch.
+3. **Strategies**
+   - List of instances; create, clone, edit, delete, enable/disable.
+   - Edit form auto-generated from the template's Pydantic schema, with validation errors
+     shown inline.
+   - Pick the broker account from a dropdown of connected accounts.
+   - Live mode requires a confirmation dialog.
+   - Per-instance view: today's slots and their status, trades, orders, logs.
+4. **Broker accounts**
+   - Add/edit/delete accounts: broker type, label, client ID, API key, PIN/password,
+     TOTP secret, and any broker-specific fields (driven by the adapter's credential schema).
+   - Credentials encrypted at rest (Fernet; master key from environment variable, never
+     stored in the database). Never display secrets after saving, only masked.
+   - "Test connection" button, connection status, funds available, last login time.
+   - Daily automatic re-login before market open.
+5. **Global settings**
+   - Market hours, final square-off time, NSE holiday list (editable + importable),
+     data-feed account, timezone (default Asia/Kolkata).
+   - Global risk: max daily loss, max daily profit, max open positions across all instances.
+   - Notifications: Telegram bot token + chat ID with a "Send test message" button;
+     choose which events notify.
+   - Logging level and log retention.
+   - Export/import all settings as YAML (secrets excluded).
+6. **Trades & Orders**
+   - Filterable history (date, instance, broker, symbol), CSV export,
+     daily summary per instance.
+7. **Logs**
+   - Live log stream with filters by instance and level.
+8. **Backtest**
+   - Choose an instance's template and parameters, date range, run, view trade list,
+     win rate, P&L, max drawdown and equity curve chart.
+9. **Users** (admin only)
+   - Create users, assign roles, reset passwords.
+10. **Audit log**
+   - Every settings change, toggle, login, and kill-switch use, with user and timestamp.
+
+# 3. FIRST STRATEGY PLUGIN: NIFTY 5-Minute Reference Candle Breakout (ATM option buying)
+
+## Overview
+At fixed times, a specific 5-minute NIFTY spot candle becomes the reference candle.
+If NIFTY spot breaks above its high + buffer, BUY the ATM Call; if it breaks below its
+low − buffer, BUY the ATM Put. Stop-loss is based on NIFTY spot. Every trade is
+force-closed at a fixed time.
+
+## Settings schema (all editable in the UI; defaults shown)
+- reference_candle_starts (IST): 09:45, 10:00, 10:15, 10:45, 11:15, 11:45, 12:10, 12:45,
+  13:15, 13:45, 14:10, 14:35, 14:55
+- candle_timeframe_min: 5
+- buffer_points: 2.25
+- entry_window_candles: 2 (entry window = reference close → reference close + 10 min)
+- exit_offset_min: 15 (hard exit = reference START + 15 min, e.g. 09:45 → 10:00, 12:10 → 12:25)
+- lots: 5 (lot size read from the broker's instrument master, never hard-coded)
+- strike_step: 50
+- expiry: nearest non-expired weekly
+- entry_trigger: tick (alternative: candle_close)
+- entry_order_type: MARKET (alternative: LIMIT with configurable slippage)
+- protective_sl_pct: disaster SL-M on option premium, e.g. 40%
+- take_profit_mode: none | spot_points | r_multiple | premium_pct, with value
+- candle_finalization_delay_sec: 5
+
+## Entry rules
+- After the reference candle closes, record ref_high and ref_low.
+- During the entry window, watch NIFTY spot LTP:
+  - spot > ref_high + buffer_points → BUY ATM CE
+  - spot < ref_low − buffer_points → BUY ATM PE
+- ATM strike = spot at entry, rounded to nearest strike_step.
+- First breakout only; max one trade per slot; no re-entry after SL in the same slot;
+  skip the slot if no breakout before the hard exit; one open position per instance.
+
+## Exits (whichever comes first; cancel all other pending exit orders)
+- Spot SL, managed in code: CE exits if spot ≤ ref_low; PE exits if spot ≥ ref_high.
+- Take-profit per take_profit_mode (default none).
+- Hard exit at the slot's exit time, at market.
+- Protective SL-M at the broker as a disaster stop if the app or connection fails.
+
+## Known bugs from the previous implementation (must not repeat)
+1. Buffer of 2.25 points was not applied.
+2. Exit was reference start + 20 min; correct is + 15 min.
+3. Reference candles were picked dynamically instead of from the fixed schedule.
+4. Trades were labelled CALL_CREDIT / PUT_CREDIT; they are buys: CE_BUY / PE_BUY.
+5. Quantity was 1 lot instead of 5.
+
+## Log format
+[HH:MM:SS] [instance] REF slot=#n candle=HH:MM high=… low=… long_trigger=… short_trigger=… exit=HH:MM
+[HH:MM:SS] [instance] ENTRY CE_BUY symbol=… strike=… qty=… spot=… spot_SL=… exit=HH:MM
+[HH:MM:SS] [instance] EXIT reason=spot_stop_loss|take_profit|timed_exit|kill_switch premium_in=… premium_out=… pnl=…
+[HH:MM:SS] [instance] SKIP slot=#n reason=no_breakout
+
+# 4. GENERAL REQUIREMENTS
+- Confirm fills from order book / order updates; handle rejections, partial fills,
+  tick-size rounding, rate limits, retries with backoff.
+- Persist all state; on restart, reconcile each broker account's positions and orders
+  before resuming any instance.
+- Risk checks run before every order at three levels: instance, broker account, global.
+- Python 3.11+, type hints, asyncio throughout; all times Asia/Kolkata.
+- The web server binds to 127.0.0.1 by default; README explains HTTPS via a reverse proxy
+  if exposed remotely.
+- Tests (pytest): strategy rules (buffer, slot/exit times, ATM strike, spot SL,
+  one trade per slot), settings validation, credential encryption, login/auth,
+  enable/disable while in trade, instance isolation, adapter contract tests using a mock broker.
+- README: setup, creating the master encryption key, first-run admin creation, adding
+  broker accounts, Angel One API key + TOTP setup, adding a new strategy plugin, adding a
+  new broker adapter, and a note to check each broker's current API rules (e.g. static IP
+  registration and algo identification under SEBI's retail algo framework) before going live.
+
+# 5. PROJECT STRUCTURE
+algo_platform/
+├── app/
+│   ├── main.py              (FastAPI app, startup/shutdown)
+│   ├── auth/                (users, sessions, 2FA, roles)
+│   ├── web/                 (routes, templates, static)
+│   └── api/                 (JSON endpoints, websocket/SSE)
+├── brokers/
+│   ├── base.py              (adapter interface, normalized models)
+│   ├── angelone.py
+│   ├── paper.py
+│   └── stubs/               (zerodha.py, upstox.py, dhan.py, fyers.py)
+├── strategies/
+│   ├── base.py              (strategy interface, settings base model)
+│   ├── registry.py
+│   └── nifty_ref_breakout.py
+├── engine/
+│   ├── strategy_manager.py
+│   ├── market_data.py
+│   ├── candles.py
+│   ├── order_manager.py
+│   ├── exit_manager.py
+│   └── risk_manager.py
+├── backtest/                (engine.py, report.py)
+├── storage/                 (db.py, models.py, crypto.py, migrations/)
+├── notify/                  (telegram.py)
+├── tests/
+├── run.py                   (starts web app + engine)
+├── requirements.txt
+├── .env.example
+└── README.md
+
+# 6. OUTPUT
+1. Restate the strategy rules and list any assumptions.
+2. Architecture overview with a short data-flow description
+   (market data → strategy instance → risk checks → broker adapter).
+3. Every file complete and runnable, with no placeholders or TODOs (except the
+   clearly marked broker stubs).
+4. Setup and run instructions.
+Build in stages: (a) data models, broker interface, Angel One + paper adapters;
+(b) strategy plugin and its tests; (c) engine and risk; (d) web app with login and
+settings pages; (e) backtest; (f) README.
+
+
+# 2A. REAL-TIME BROKER SYNC (broker is the source of truth)
+
+## Principle
+Everything the platform shows about orders, stop-losses, positions and P&L must match what
+the broker shows, in real time. The platform never assumes an order's state; it reads it
+from the broker.
+
+## Order and trade sync
+- Subscribe to Angel One's order-update websocket for live order status changes.
+- Backup polling of order book, trade book and positions every few seconds (configurable,
+  rate-limit aware) to catch missed updates; also run a full reconciliation on reconnect.
+- Tag every platform order with the broker's order-tag field (instance ID + trade ID) so
+  every broker order maps back to its strategy instance and trade.
+- Orders placed, modified or cancelled directly in the broker's app must appear on the
+  platform within seconds:
+  - Unrecognized orders/positions are shown as "External / manual".
+  - If the user manually exits a strategy's position at the broker, the strategy marks the
+    trade closed with reason=manual_exit_at_broker, cancels its remaining exit orders,
+    and does not try to re-enter for that slot.
+  - If the user cancels the protective SL order at the broker, raise an alert.
+
+## Live P&L
+- Unrealized MTM = (live LTP − average price) × net quantity, updated on every tick of the
+  position's instrument, using quantity and average price from the broker's positions API.
+- Realized P&L from the broker's trade book (actual fill prices), not from signal prices.
+- Every few seconds, compare platform P&L with the broker's position P&L; if they differ
+  beyond a small tolerance, show a warning badge and log a reconciliation event.
+- Show gross P&L (should match the broker's screen) and, separately, estimated net P&L
+  after charges (brokerage, STT, exchange charges, GST, SEBI fee, stamp duty), with the
+  charge rates configurable in Global Settings.
+- Show P&L at three levels: per trade, per strategy instance, per broker account, plus a
+  combined total.
+
+## Live stop-loss and exit visibility
+For every open position, display in real time:
+- Spot SL level, current spot, distance to SL in points.
+- Protective SL order at the broker: order ID, trigger price, status (trigger pending /
+  triggered / cancelled).
+- Take-profit level (if enabled) and distance.
+- Countdown to the timed exit.
+
+## UI delivery
+- Push all updates to the browser via WebSocket/SSE; no page refresh needed.
+  Target end-to-end delay of about 1 second from broker update to screen.
+- Per broker account: connection indicator (green/amber/red), last tick time,
+  last order-sync time.
+- If the order-update feed or tick feed is stale beyond a threshold, show a red banner,
+  log it, and send an alert.
+
+  # 2B. EVENT LOGGING (complete audit trail)
+
+## Structure
+Every event is a structured record with:
+timestamp (IST, millisecond precision), level, category, event type, strategy instance,
+broker account, trade_id (correlation ID linking signal → orders → fills → exit),
+human-readable message, and a full JSON payload.
+Stored in the database and in a rotating JSON-lines file. Secrets (API keys, PIN, TOTP,
+tokens) are always masked.
+
+## Events to log
+**System**
+- App start/stop, user login/logout (success/failure), settings changed (old → new values)
+- Broker login success/failure, session refresh, token expiry
+- Tick websocket and order-update websocket: connected, disconnected, reconnecting, resubscribed
+- Instrument master downloaded (count, time taken), holiday list loaded
+
+**Market**
+- Pre-open, market open (09:15), market close (15:30), holiday detected / no trading today
+- Final square-off time reached
+
+**Strategy**
+- Instance enabled/disabled/started/stopped/errored, parameters applied
+- Reference candle formed: slot, start/end time, OHLC, long trigger, short trigger, exit time
+- Entry window opened / closed
+- Signal received: direction, spot at signal, trigger crossed, selected strike, expiry, symbol, token
+- Signal rejected: reason (risk limit, already in position, outside window, etc.)
+- Slot skipped: reason=no_breakout
+
+**Orders** (one event for each, with all parameters)
+- Order request sent: variety, trading symbol, token, exchange, transaction type, order
+  type, product type, duration, quantity (lots and units), price, trigger price, order tag,
+  and the signal price it came from
+- Broker response: order ID, response time in ms, success or error message
+- Every status change: open, trigger pending, partially filled, complete, rejected (with
+  broker's rejection reason), cancelled, modified (old → new values)
+- Execution: fill price, fill quantity, exchange order ID, exchange timestamp,
+  slippage vs signal premium
+- Retries, with attempt number and reason
+
+**Positions and exits**
+- Position opened: symbol, quantity, average price, spot SL, protective SL order ID, TP, exit time
+- MTM snapshots at a configurable interval (e.g. every 30s) while open
+- Exit triggered: reason (spot_stop_loss, take_profit, timed_exit, manual_exit_at_broker,
+  kill_switch, square_off), spot and premium at trigger time
+- Exit order placed and filled (same detail as entry)
+- Position closed: entry and exit prices, quantity, gross P&L, estimated charges,
+  net P&L, holding duration
+
+**Risk and errors**
+- Risk limit warnings and breaches (instance, account, global), kill switch activated (by whom)
+- P&L reconciliation mismatches between platform and broker
+- API errors with request (masked) and response, unhandled exceptions with stack trace
+
+## Logs in the UI
+- Live log stream with filters: date, level, category, event type, instance, broker, trade_id,
+  plus text search.
+- **Trade timeline view**: click any trade to see its full chain in order (reference candle →
+  signal → entry order → fill → SL order → exit trigger → exit fill → P&L) with timestamps
+  and latency between steps.
+- Export filtered logs as CSV or JSON.
+- Telegram alerts selectable per event category and level.
+
+## Log format examples
+[09:15:00.000] MARKET   MARKET_OPEN
+[09:50:05.112] STRATEGY REF_CANDLE inst=NIFTY-Angel1 slot=1 candle=09:45 O=… H=… L=… C=… long_trigger=H+2.25 short_trigger=L−2.25 exit=10:00
+[09:52:31.408] STRATEGY SIGNAL inst=NIFTY-Angel1 trade=T123 dir=CE_BUY spot=… trigger=… strike=… expiry=… symbol=…
+[09:52:31.425] ORDER    REQUEST trade=T123 variety=NORMAL symbol=… token=… exch=NFO side=BUY type=MARKET product=INTRADAY qty=5 lots (… units) tag=…
+[09:52:31.610] ORDER    ACCEPTED trade=T123 order_id=… latency=185ms
+[09:52:31.902] ORDER    FILLED trade=T123 order_id=… fill_price=… qty=… exch_order_id=… slippage=…
+[09:52:32.150] ORDER    SL_PLACED trade=T123 order_id=… type=SL-M trigger=… status=TRIGGER_PENDING
+[09:56:10.004] POSITION MTM trade=T123 ltp=… unrealized=… broker_pnl=… diff=0.00
+[10:00:00.003] EXIT     TRIGGERED trade=T123 reason=timed_exit spot=… premium=…
+[10:00:00.390] ORDER    FILLED trade=T123 side=SELL fill_price=…
+[10:00:00.420] POSITION CLOSED trade=T123 entry=… exit=… gross=… charges=… net=… duration=7m29s

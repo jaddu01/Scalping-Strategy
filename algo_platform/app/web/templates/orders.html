@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Orders{% endblock %}
+{% block content %}
+<div class="row" style="margin-bottom:12px"><h1 style="margin:0">Orders</h1><div class="spacer"></div><a class="btn" href="/trades">← Trades</a></div>
+<form method="get" class="filters">
+  <div class="field"><label>From</label><input type="date" name="day_from" value="{{ f.day_from }}"></div>
+  <div class="field"><label>To</label><input type="date" name="day_to" value="{{ f.day_to }}"></div>
+  <div class="field"><label>Instance</label><select name="instance_id"><option value="">all</option>{% for i, n in inst.items() %}<option value="{{ i }}" {{ 'selected' if f.instance_id == i }}>{{ n }}</option>{% endfor %}</select></div>
+  <div class="field"><label>Broker</label><select name="account_id"><option value="">all</option>{% for i, n in acc.items() %}<option value="{{ i }}" {{ 'selected' if f.account_id == i }}>{{ n }}</option>{% endfor %}</select></div>
+  <div class="field"><label>Symbol</label><input type="text" name="symbol" value="{{ f.symbol }}"></div>
+  <div class="field"><label class="inline"><input type="checkbox" name="external" value="1" {{ 'checked' if external }}> External / manual only</label></div>
+  <button type="submit">Filter</button>
+</form>
+<div class="panel">
+<table><thead><tr><th>Updated</th><th>Account</th><th>Order ID</th><th>Tag</th><th>Trade</th><th>Instance</th><th>Purpose</th><th>Side</th><th>Type</th><th>Symbol</th><th class="num">Qty</th><th class="num">Filled</th><th class="num">Avg</th><th class="num">Price</th><th class="num">Trigger</th><th class="num">Latency</th><th>Status</th></tr></thead>
+<tbody>{% for o in rows %}<tr>
+  <td class="small nowrap">{{ o.updated_at|dt }}</td><td>{{ acc.get(o.account_id, '–') }}{% if o.paper %} <span class="badge paper">paper</span>{% endif %}</td>
+  <td class="mono">{{ o.broker_order_id }}</td><td class="mono small">{{ o.tag or '' }}</td>
+  <td>{% if o.trade_ref %}<a href="/trades/{{ o.trade_ref }}">{{ o.trade_ref }}</a>{% endif %}</td><td>{{ inst.get(o.instance_id, '') }}</td>
+  <td>{% if o.is_external %}<span class="badge ext">External / manual</span>{% else %}{{ o.purpose }}{% endif %}</td>
+  <td>{{ o.side }}</td><td>{{ o.order_type }}</td><td class="small">{{ o.tradingsymbol }}</td><td class="num">{{ o.quantity }}</td><td class="num">{{ o.filled_quantity }}</td>
+  <td class="num">{{ o.average_price|money }}</td><td class="num">{{ o.price|money }}</td><td class="num">{{ o.trigger_price|money }}</td><td class="num">{{ (o.latency_ms ~ ' ms') if o.latency_ms is not none else '' }}</td>
+  <td><span class="badge {{ o.status }}">{{ o.status }}</span>{% if o.status_message %}<div class="small muted">{{ o.status_message }}</div>{% endif %}</td></tr>
+{% else %}<tr><td colspan="17" class="muted">No orders match.</td></tr>{% endfor %}</tbody></table></div>
+{% endblock %}

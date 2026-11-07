@@ -1,0 +1,48 @@
+{% macro field(f) %}
+  {% if f.kind == 'group' %}
+  <fieldset>
+    <legend>{{ f.label }}</legend>
+    {% if f.description %}<p class="muted small">{{ f.description }}</p>{% endif %}
+    <div class="fields">{% for c in f.children %}{{ field(c) }}{% endfor %}</div>
+  </fieldset>
+  {% else %}
+  <div class="field {{ 'has-error' if f.error else '' }}">
+    {% if f.kind == 'checkbox' %}
+      <label class="inline"><input type="checkbox" name="{{ f.name }}" {{ 'checked' if f.value else '' }}> {{ f.label }}</label>
+    {% else %}
+      <label for="f-{{ f.name }}">{{ f.label }}{% if f.required %} *{% endif %}</label>
+      {% if f.kind == 'select' %}
+        <select id="f-{{ f.name }}" name="{{ f.name }}">
+          {% for v, l in f.options %}<option value="{{ v }}" {{ 'selected' if v|string == f.value|string else '' }}>{{ l }}</option>{% endfor %}
+        </select>
+      {% elif f.kind == 'multiselect' %}
+        <div class="checks">
+          {% for v, l in f.options %}<label><input type="checkbox" name="{{ f.name }}" value="{{ v }}" {{ 'checked' if v in f.value else '' }}> {{ l }}</label>{% endfor %}
+        </div>
+      {% elif f.kind == 'number' %}
+        <input id="f-{{ f.name }}" type="number" name="{{ f.name }}" value="{{ f.value }}" step="{{ f.step }}"
+               {% if f.min is not none %}min="{{ f.min }}"{% endif %} {% if f.max is not none %}max="{{ f.max }}"{% endif %}>
+      {% elif f.kind == 'time' %}
+        <input id="f-{{ f.name }}" type="time" name="{{ f.name }}" value="{{ f.value }}">
+      {% elif f.kind == 'password' %}
+        <input id="f-{{ f.name }}" type="password" name="{{ f.name }}" value="" autocomplete="new-password"
+               placeholder="{{ '•••••• saved — leave blank to keep' if f.has_saved_secret else '' }}">
+      {% elif f.kind == 'list' %}
+        <textarea id="f-{{ f.name }}" name="{{ f.name }}" rows="2">{{ f.value }}</textarea>
+      {% elif f.kind == 'textarea' %}
+        <textarea id="f-{{ f.name }}" name="{{ f.name }}">{{ f.value }}</textarea>
+      {% else %}
+        <input id="f-{{ f.name }}" type="text" name="{{ f.name }}" value="{{ f.value }}">
+      {% endif %}
+    {% endif %}
+    {% if f.description %}<div class="help">{{ f.description }}</div>{% endif %}
+    {% if f.error %}<div class="error">{{ f.error }}</div>{% endif %}
+  </div>
+  {% endif %}
+{% endmacro %}
+
+{% macro general_errors(errs) %}
+  {% if errs %}<div class="flash err">{% for e in errs %}<div>{{ e }}</div>{% endfor %}</div>{% endif %}
+{% endmacro %}
+
+{% macro csrf() %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endmacro %}

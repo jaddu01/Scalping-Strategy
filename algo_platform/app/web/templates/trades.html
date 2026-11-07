@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Trades{% endblock %}
+{% block content %}
+<div class="row" style="margin-bottom:12px"><h1 style="margin:0">Trades</h1><div class="spacer"></div>
+  <a class="btn" href="/orders">Orders →</a><a class="btn" href="/trades.csv?{{ qs }}">Export CSV</a></div>
+<form method="get" class="filters">
+  <div class="field"><label>From</label><input type="date" name="day_from" value="{{ f.day_from }}"></div>
+  <div class="field"><label>To</label><input type="date" name="day_to" value="{{ f.day_to }}"></div>
+  <div class="field"><label>Instance</label><select name="instance_id"><option value="">all</option>{% for i, n in inst.items() %}<option value="{{ i }}" {{ 'selected' if f.instance_id == i }}>{{ n }}</option>{% endfor %}</select></div>
+  <div class="field"><label>Broker</label><select name="account_id"><option value="">all</option>{% for i, n in acc.items() %}<option value="{{ i }}" {{ 'selected' if f.account_id == i }}>{{ n }}</option>{% endfor %}</select></div>
+  <div class="field"><label>Symbol</label><input type="text" name="symbol" value="{{ f.symbol }}"></div>
+  <div class="field"><label>Status</label><select name="status"><option value="">all</option>{% for s in ['CLOSED','OPEN','EXITING','PENDING_ENTRY','FAILED'] %}<option {{ 'selected' if f.status == s }}>{{ s }}</option>{% endfor %}</select></div>
+  <div class="field"><label>Mode</label><select name="mode"><option value="">all</option><option {{ 'selected' if f.mode == 'live' }}>live</option><option {{ 'selected' if f.mode == 'paper' }}>paper</option></select></div>
+  <button type="submit">Filter</button>
+</form>
+
+<div class="cards">
+  <div class="card"><div class="k">Closed trades</div><div class="v">{{ totals.trades }}</div></div>
+  <div class="card"><div class="k">Gross P&amp;L</div><div class="v {{ totals.gross|pnlc }}">{{ totals.gross|money }}</div></div>
+  <div class="card"><div class="k">Charges (est.)</div><div class="v">{{ totals.charges|money }}</div></div>
+  <div class="card"><div class="k">Net P&amp;L (est.)</div><div class="v {{ totals.net|pnlc }}">{{ totals.net|money }}</div></div>
+</div>
+
+<div class="panel"><h2 style="margin-top:0">Daily summary per instance</h2>
+<table><thead><tr><th>Date</th><th>Instance</th><th class="num">Trades</th><th class="num">Wins</th><th class="num">Losses</th><th class="num">Win %</th><th class="num">Gross</th><th class="num">Charges</th><th class="num">Net</th></tr></thead>
+<tbody>{% for (d, name), b in summary %}<tr><td>{{ d }}</td><td>{{ name }}</td><td class="num">{{ b.trades }}</td><td class="num">{{ b.wins }}</td><td class="num">{{ b.losses }}</td>
+  <td class="num">{{ ((100 * b.wins / b.trades) if b.trades else 0)|round(1) }}</td><td class="num {{ b.gross|pnlc }}">{{ b.gross|money }}</td><td class="num">{{ b.charges|money }}</td><td class="num {{ b.net|pnlc }}">{{ b.net|money }}</td></tr>
+{% else %}<tr><td colspan="9" class="muted">No closed trades in range.</td></tr>{% endfor %}</tbody></table></div>
+
+<div class="panel"><h2 style="margin-top:0">Trades</h2>
+<table><thead><tr><th>Trade</th><th>Date</th><th>Instance</th><th>Broker</th><th>Mode</th><th>Slot</th><th>Dir</th><th>Symbol</th><th class="num">Qty</th><th>Signal</th><th class="num">Spot</th><th class="num">Entry</th><th class="num">Exit</th><th>Reason</th><th class="num">Gross</th><th class="num">Charges</th><th class="num">Net</th><th>Status</th></tr></thead>
+<tbody>{% for t in rows %}<tr>
+  <td><a href="/trades/{{ t.trade_ref }}">{{ t.trade_ref }}</a></td><td class="nowrap">{{ t.trade_date }}</td><td>{{ inst.get(t.instance_id, (t.meta or {}).get('deleted_instance', '–')) }}</td><td>{{ acc.get(t.account_id, '–') }}</td>
+  <td><span class="badge {{ t.mode }}">{{ t.mode }}</span></td><td>{{ t.slot_id.split('#')[-1] if t.slot_id else '' }}</td><td>{{ t.direction }}</td><td class="small">{{ t.tradingsymbol }}</td>
+  <td class="num">{{ t.quantity }}</td><td class="small nowrap">{{ t.signal_time|dt('%H:%M:%S') }}</td><td class="num">{{ t.signal_spot|money }}</td>
+  <td class="num">{{ t.entry_price|money }}</td><td class="num">{{ t.exit_price|money }}</td><td class="small">{{ t.exit_reason or '' }}</td>
+  <td class="num {{ t.gross_pnl|pnlc }}">{{ t.gross_pnl|money }}</td><td class="num">{{ t.charges|money }}</td><td class="num {{ t.net_pnl|pnlc }}">{{ t.net_pnl|money }}</td>
+  <td><span class="badge {{ t.status }}">{{ t.status }}</span></td></tr>
+{% else %}<tr><td colspan="18" class="muted">No trades match.</td></tr>{% endfor %}</tbody></table></div>
+{% endblock %}

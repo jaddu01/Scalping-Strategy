@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Two-factor{% endblock %}
+{% block content %}
+<div class="auth">
+  <h1>Two-factor verification</h1>
+  <div class="panel">
+    {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+    <form method="post" action="/login/totp" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="{{ next or '/' }}">
+      <div class="field"><label>6-digit code from your authenticator app</label>
+        <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9 ]{6,7}" autofocus required></div>
+      <button class="primary" type="submit">Verify</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

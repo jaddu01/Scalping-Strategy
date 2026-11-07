@@ -1,0 +1,19 @@
+{% if not rt %}
+  <p class="muted">The instance is not running. Enable it to see today's slots.</p>
+{% elif not rt.strategy.slots %}
+  <p class="muted">{{ rt.message or 'No slots scheduled.' }}</p>
+{% else %}
+  {% if rt.strategy.pending_settings %}<div class="flash ok small">New parameters are queued and will apply from the next slot.</div>{% endif %}
+  <table>
+    <thead><tr><th>#</th><th>Reference</th><th>Entry window</th><th>Exit</th><th>State</th><th class="num">Ref high</th><th class="num">Ref low</th><th class="num">Long trigger</th><th class="num">Short trigger</th><th>Direction</th><th>Trade</th><th>Result</th></tr></thead>
+    <tbody>
+    {% for s in rt.strategy.slots %}
+      <tr><td>{{ s.no }}</td><td>{{ s.ref_start }}–{{ s.ref_end }}</td><td>{{ s.ref_end }}–{{ s.entry_end }}</td><td>{{ s.exit_at }}</td>
+        <td><span class="badge {{ 'IN_TRADE' if s.state == 'IN_TRADE' else ('RUNNING' if s.state in ('WATCHING', 'AWAITING_CANDLE') else ('STOPPED' if s.state in ('MISSED',) else ('WAITING' if s.state == 'PENDING' else 'grey'))) }}">{{ s.state }}</span></td>
+        <td class="num">{{ s.ref_high|money }}</td><td class="num">{{ s.ref_low|money }}</td>
+        <td class="num">{{ s.long_trigger|money }}</td><td class="num">{{ s.short_trigger|money }}</td>
+        <td>{{ s.direction or '' }}</td><td>{% if s.trade_id %}<a href="/trades/{{ s.trade_id }}">{{ s.trade_id }}</a>{% endif %}</td><td>{{ s.result or '' }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% endif %}

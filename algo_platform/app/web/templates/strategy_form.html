@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% import "macros.html" as m with context %}
+{% block title %}{{ 'Edit' if instance else 'New' }} instance{% endblock %}
+{% block content %}
+<h1>{{ ('Edit ' ~ instance.name) if instance else 'New strategy instance' }}</h1>
+<p class="muted">{{ template.display_name }} — {{ template.description }}</p>
+{{ m.general_errors(general_errors) }}
+<form method="post" class="stack" action="{{ ('/strategies/' ~ instance.id ~ '/edit') if instance else ('/strategies/new?template=' ~ template_id) }}">
+  {{ m.csrf() }}
+  <input type="hidden" name="confirm_live" id="confirm-live" value="{{ 'yes' if instance and instance.mode == 'live' else '' }}">
+  <fieldset>
+    <legend>Instance</legend>
+    <div class="fields">
+      <div class="field {{ 'has-error' if errors.name }}"><label>Name *</label><input type="text" name="name" value="{{ values.name }}" required>
+        {% if errors.name %}<div class="error">{{ errors.name }}</div>{% endif %}<div class="help">e.g. “NIFTY Breakout – Angel A/c 1 – Live”</div></div>
+      <div class="field {{ 'has-error' if errors.broker_account_id }}"><label>Broker account</label>
+        <select name="broker_account_id">
+          <option value="">— choose —</option>
+          {% for a in accounts %}<option value="{{ a.id }}" {{ 'selected' if values.broker_account_id == a.id }}>{{ a.label }} · {{ a.broker_type }} · {{ a.status }}</option>{% endfor %}
+        </select>
+        {% if errors.broker_account_id %}<div class="error">{{ errors.broker_account_id }}</div>{% endif %}
+        <div class="help">Orders always go through this account. In paper mode they are simulated on its live prices.</div></div>
+      <div class="field {{ 'has-error' if errors.mode }}"><label>Mode</label>
+        <select name="mode" id="mode-select">
+          <option value="paper" {{ 'selected' if values.mode == 'paper' }}>Paper (simulated fills)</option>
+          <option value="live" {{ 'selected' if values.mode == 'live' }}>LIVE (real orders)</option>
+        </select>
+        {% if errors.mode %}<div class="error">{{ errors.mode }}</div>{% endif %}</div>
+    </div>
+    <div class="field" style="margin-top:12px"><label>Notes</label><textarea name="notes" rows="2">{{ values.notes }}</textarea></div>
+  </fieldset>
+  <fieldset>
+    <legend>Strategy parameters</legend>
+    {% if instance %}<p class="small muted">Changes to a running instance apply from the next trade slot, never mid-trade.</p>{% endif %}
+    <div class="fields">{% for f in param_fields %}{{ m.field(f) }}{% endfor %}</div>
+  </fieldset>
+  <fieldset>
+    <legend>Instance risk limits</legend>
+    <div class="fields">{% for f in risk_fields %}{{ m.field(f) }}{% endfor %}</div>
+  </fieldset>
+  <div class="row"><button class="primary" type="submit">Save</button><a class="btn" href="{{ ('/strategies/' ~ instance.id) if instance else '/strategies' }}">Cancel</a></div>
+</form>
+{% endblock %}

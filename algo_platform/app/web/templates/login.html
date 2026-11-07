@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Sign in{% endblock %}
+{% block content %}
+<div class="auth">
+  <h1>⚡ Algo Platform</h1>
+  <div class="panel">
+    {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
+    <form method="post" action="/login" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="{{ next or '/' }}">
+      <div class="field"><label>Username</label><input type="text" name="username" value="{{ username or '' }}" autocomplete="username" autofocus required></div>
+      <div class="field"><label>Password</label><input type="password" name="password" autocomplete="current-password" required></div>
+      <button class="primary" type="submit">Sign in</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,42 @@
+# The platform as its own compose project, joined to an existing Docker network so the existing
+# nginx container can proxy to it as http://algo_platform:8000. Nothing is published publicly; the
+# 127.0.0.1:8100 port is only for an SSH tunnel from your Mac.
+#   cd /opt/algo_platform && sudo docker compose -f deploy/docker/compose.yml up -d --build
+name: algo-platform
+
+services:
+  platform:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: algo-platform:latest
+    container_name: algo_platform
+    restart: unless-stopped
+    environment:
+      ALGO_HOST: 0.0.0.0
+      ALGO_PORT: "8000"
+      ALGO_DATA_DIR: /app/data
+      ALGO_DATABASE_URL: ""
+      ALGO_TRUST_PROXY_HEADERS: "true"
+      ALGO_FORWARDED_ALLOW_IPS: "*"
+      ALGO_COOKIE_SECURE: "true"
+    volumes:
+      - /opt/algo_platform/data:/app/data
+      - /opt/algo_platform/logs:/app/logs
+      - /opt/algo_platform/.env:/app/.env:ro
+    ports:
+      - "127.0.0.1:8100:8000"
+    networks:
+      - shared
+    mem_limit: 600m
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  shared:
+    external: true
+    name: algo-trading_default

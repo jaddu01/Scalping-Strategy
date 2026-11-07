@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}First-run setup{% endblock %}
+{% block content %}
+<div class="auth">
+  <h1>Create the admin user</h1>
+  <div class="panel">
+    <p class="muted">No users exist yet. The first user is the administrator. Broker logins are configured separately after you sign in.</p>
+    {% if errors %}<div class="flash err">{% for e in errors %}<div>{{ e }}</div>{% endfor %}</div>{% endif %}
+    <form method="post" action="/setup" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="field"><label>Username</label><input type="text" name="username" value="{{ username or '' }}" autocomplete="username" required></div>
+      <div class="field"><label>Password</label><input type="password" name="password" autocomplete="new-password" required>
+        <div class="help">At least 10 characters, mixing letters with digits or symbols.</div></div>
+      <div class="field"><label>Repeat password</label><input type="password" name="password2" autocomplete="new-password" required></div>
+      <button class="primary" type="submit">Create admin</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

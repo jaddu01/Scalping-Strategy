@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Backtest #{{ run.id }}{% endblock %}
+{% block content %}
+{% set s = res.summary %}
+<div class="row" style="margin-bottom:10px"><h1 style="margin:0">Backtest #{{ run.id }}</h1><span class="muted">{{ run.config.day_from }} → {{ run.config.day_to }} · {{ res.days }} trading days · {{ run.config.candles }} candles{% if run.config.source == 'broker' %} · {{ run.config.days_cached or 0 }} day(s) from cache, {{ run.config.days_fetched or 0 }} fetched · <a href="/backtest/{{ run.id }}/candles.csv">download candles (CSV)</a>{% endif %}</span>
+  <div class="spacer"></div><a class="btn" href="/backtest">New backtest</a></div>
+<div class="cards">
+  <div class="card"><div class="k">Trades</div><div class="v">{{ s.trades }}</div></div>
+  <div class="card"><div class="k">Win rate</div><div class="v">{{ s.win_rate }}%</div></div>
+  <div class="card"><div class="k">Net P&amp;L (est.)</div><div class="v {{ s.net_pnl|pnlc }}">{{ s.net_pnl|money }}</div></div>
+  <div class="card"><div class="k">Gross / charges</div><div class="v" style="font-size:15px">{{ s.gross_pnl|money }} / {{ s.charges|money }}</div></div>
+  <div class="card"><div class="k">Max drawdown</div><div class="v neg">{{ s.max_drawdown|money }}</div></div>
+  <div class="card"><div class="k">Profit factor</div><div class="v">{{ s.profit_factor if s.profit_factor is not none else '–' }}</div></div>
+  <div class="card"><div class="k">Avg win / loss</div><div class="v" style="font-size:15px"><span class="pos">{{ s.avg_win|money }}</span> / <span class="neg">{{ s.avg_loss|money }}</span></div></div>
+  <div class="card"><div class="k">Spot points captured</div><div class="v {{ s.spot_points|pnlc }}">{{ s.spot_points }}</div></div>
+</div>
+<div class="panel"><h2 style="margin-top:0">Equity curve (net)</h2>{{ svg|safe }}</div>
+<div class="grid2">
+  <div class="panel"><h2 style="margin-top:0">Exit reasons</h2><table>{% for k, v in res.exit_reasons.items() %}<tr><th>{{ k }}</th><td class="num">{{ v }}</td></tr>{% endfor %}</table></div>
+  <div class="panel"><h2 style="margin-top:0">Assumptions</h2><table>{% for k, v in res.assumptions.items() if k != 'charges' %}<tr><th>{{ k }}</th><td class="small">{{ v }}</td></tr>{% endfor %}</table></div>
+</div>
+<div class="panel"><h2 style="margin-top:0">Trades</h2>
+<table><thead><tr><th>#</th><th>Day</th><th>Slot</th><th>Ref</th><th>Dir</th><th>Strike</th><th>Signal</th><th class="num">Spot</th><th class="num">SL</th><th class="num">Prem in</th><th>Exit</th><th class="num">Exit spot</th><th class="num">Prem out</th><th>Reason</th><th class="num">Pts</th><th class="num">Gross</th><th class="num">Net</th></tr></thead>
+<tbody>{% for t in res.trades %}<tr><td>{{ t.trade_id }}</td><td class="nowrap">{{ t.day }}</td><td>{{ t.slot }}</td><td>{{ t.ref_start }}</td><td>{{ t.direction }}</td><td>{{ t.strike }}</td><td>{{ t.signal_time }}</td>
+  <td class="num">{{ t.entry_spot|money }}</td><td class="num">{{ t.spot_sl|money }}</td><td class="num">{{ t.entry_premium|money }}</td><td>{{ t.exit_time }}</td><td class="num">{{ t.exit_spot|money }}</td>
+  <td class="num">{{ t.exit_premium|money }}</td><td class="small">{{ t.exit_reason }}</td><td class="num {{ t.spot_points|pnlc }}">{{ t.spot_points }}</td>
+  <td class="num {{ t.gross|pnlc }}">{{ t.gross|money }}</td><td class="num {{ t.net|pnlc }}">{{ t.net|money }}</td></tr>
+{% else %}<tr><td colspan="17" class="muted">No trades.</td></tr>{% endfor %}</tbody></table></div>
+<details class="panel"><summary>Strategy log ({{ res.events|length }} lines)</summary><pre>{% for e in res.events %}[{{ e.time }}] {{ e.message }}
+{% endfor %}</pre></details>
+{% endblock %}

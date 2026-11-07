@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>{% block title %}Algo Platform{% endblock %} · Algo Platform</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body data-user="{{ user.username if user else '' }}" data-admin="{{ '1' if is_admin else '0' }}"
+      data-idle="{{ request.app.state.config.session_idle_minutes if user else 0 }}">
+{% if user %}
+<header class="topbar">
+  <a class="brand" href="/">⚡ Algo Platform</a>
+  <nav class="nav">
+    {% for href, label in nav %}
+    <a href="{{ href }}" class="{{ 'active' if (path == href or (href != '/' and path.startswith(href))) else '' }}">{{ label }}</a>
+    {% endfor %}
+  </nav>
+  <div class="spacer"></div>
+  <div class="conn" id="conn"></div>
+  <span class="dot red" id="ws-dot" title="live connection"></span>
+  <a href="/profile" class="muted">{{ user.username }} <span class="badge">{{ user.role }}</span></a>
+  <form method="post" action="/logout" class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <button class="small" type="submit">Sign out</button>
+  </form>
+</header>
+<div class="banners" id="banners"></div>
+{% endif %}
+<main>
+  {% if ok %}<div class="flash ok">{{ ok }}</div>{% endif %}
+  {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

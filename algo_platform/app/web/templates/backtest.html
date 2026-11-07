@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% import "macros.html" as m with context %}
+{% block title %}Backtest{% endblock %}
+{% block content %}
+<h1>Backtest</h1>
+<div class="grid2">
+<div>
+{{ m.general_errors(general_errors) }}
+<form method="get" action="/backtest" class="row" style="margin-bottom:10px">
+  <select name="instance_id"><option value="">Load parameters from an instance…</option>{% for i, n, t in instances %}<option value="{{ i }}">{{ n }}</option>{% endfor %}</select>
+  <button type="submit">Load</button>
+</form>
+<form method="post" action="/backtest?template={{ template_id }}" enctype="multipart/form-data" class="stack">
+  {{ m.csrf() }}
+  <fieldset><legend>Data</legend>
+    <div class="fields">
+      <div class="field"><label>From</label><input type="date" name="day_from" value="{{ cfg.day_from }}" required></div>
+      <div class="field"><label>To</label><input type="date" name="day_to" value="{{ cfg.day_to }}" required></div>
+      <div class="field"><label>Source</label><select name="source"><option value="broker" {{ 'selected' if cfg.source == 'broker' }}>Broker historical API (1-minute index spot)</option><option value="csv" {{ 'selected' if cfg.source == 'csv' }}>CSV upload</option></select></div>
+      <div class="field"><label>Broker account</label><select name="account_id">{% for i, n in accounts %}<option value="{{ i }}" {{ 'selected' if cfg.account_id == i|string }}>{{ n }}</option>{% endfor %}</select><div class="help">Angel One serves up to 30 days of 1-minute data per request (fetched in chunks).</div></div>
+      <div class="field"><label>CSV file</label><input type="file" name="csv_file" accept=".csv"><div class="help">Columns: timestamp, open, high, low, close (1-minute index spot, IST)</div></div>
+    </div>
+  </fieldset>
+  <fieldset><legend>Premium model</legend>
+    <p class="small muted">Expired option prices are not available from brokers, so premiums are modelled with Black-Scholes. Spot rules (reference candles, buffer, triggers, spot SL, timed exit) are replayed exactly.</p>
+    <div class="fields">
+      <div class="field"><label>Implied volatility (%)</label><input type="number" step="any" name="iv" value="{{ cfg.iv if cfg.iv is not none else 13 }}"></div>
+      <div class="field"><label>Lot size</label><input type="number" step="1" name="lot_size" value="{{ cfg.lot_size or 65 }}"><div class="help">Use the current lot size for the index you test (NIFTY 65, SENSEX 20 — check your broker).</div></div>
+      <div class="field"><label>Weekly expiry day</label><select name="expiry_weekday">{% for v, l in [(0,'Monday'),(1,'Tuesday'),(2,'Wednesday'),(3,'Thursday'),(4,'Friday')] %}<option value="{{ v }}" {{ 'selected' if cfg.expiry_weekday|string == v|string }}>{{ l }}</option>{% endfor %}</select><div class="help">NIFTY weeklies: Tuesday (Thursday before Sep-2025). SENSEX weeklies: Thursday. Bank/Fin/Midcap NIFTY: monthly only.</div></div>
+      <div class="field"><label>Slippage per fill (%)</label><input type="number" step="any" name="slippage_pct" value="{{ cfg.slippage_pct if cfg.slippage_pct is not none else 0.5 }}"></div>
+    </div>
+  </fieldset>
+  <fieldset><legend>Strategy: {{ template_id }}</legend>
+    <div class="fields">{% for f in fields %}{{ m.field(f) }}{% endfor %}</div>
+  </fieldset>
+  {% if is_admin %}<div><button class="primary" type="submit">Run backtest</button></div>{% endif %}
+</form>
+</div>
+<div class="panel"><h2 style="margin-top:0">Recent runs</h2>
+  <table><thead><tr><th>#</th><th>When</th><th>Range</th><th class="num">Trades</th><th class="num">Win %</th><th class="num">Net</th></tr></thead>
+  <tbody>{% for r in runs %}<tr><td><a href="/backtest/{{ r.id }}">{{ r.id }}</a></td><td class="small">{{ r.created_at|dt }}</td><td class="small">{{ r.config.day_from }} → {{ r.config.day_to }}</td>
+    <td class="num">{{ r.summary.trades }}</td><td class="num">{{ r.summary.win_rate }}</td><td class="num {{ r.summary.net_pnl|pnlc }}">{{ r.summary.net_pnl|money }}</td></tr>
+  {% else %}<tr><td colspan="6" class="muted">No runs yet.</td></tr>{% endfor %}</tbody></table>
+</div>
+</div>
+{% endblock %}

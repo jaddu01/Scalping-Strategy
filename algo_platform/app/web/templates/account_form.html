@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% import "macros.html" as m with context %}
+{% block title %}{{ 'Edit' if account else 'Add' }} broker account{% endblock %}
+{% block content %}
+<h1>{{ ('Edit ' ~ account.label) if account else ('Add ' ~ broker_name ~ ' account') }}</h1>
+{% if stub %}<div class="flash err">The {{ broker_name }} adapter is a documented stub: you can save credentials, but logging in raises “not implemented” until the adapter is written (see README → Adding a new broker).</div>{% endif %}
+{% if broker_type == 'angelone' %}
+<div class="panel small">
+  <b>Angel One SmartAPI setup:</b> create an app at <code>smartapi.angelbroking.com</code> to get the API key; enable TOTP at
+  <code>smartapi.angelbroking.com/enable-totp</code> and copy the <i>secret</i> (the text under the QR code), not a 6-digit code.
+  If you trade live, register your static IP with Angel One as required under SEBI's retail algo framework.
+</div>
+{% endif %}
+{{ m.general_errors(general_errors) }}
+<form method="post" class="stack" action="{{ ('/accounts/' ~ account.id ~ '/edit') if account else ('/accounts/new?broker=' ~ broker_type) }}" autocomplete="off">
+  {{ m.csrf() }}
+  <fieldset><legend>Account</legend>
+    <div class="fields">
+      <div class="field {{ 'has-error' if errors.label }}"><label>Label *</label><input type="text" name="label" value="{{ values.label }}" required>
+        {% if errors.label %}<div class="error">{{ errors.label }}</div>{% endif %}<div class="help">e.g. “Angel A/c 1”</div></div>
+      <div class="field"><label class="inline"><input type="checkbox" name="enabled" {{ 'checked' if values.enabled }}> Enabled (log in at startup)</label></div>
+      <div class="field"><label class="inline"><input type="checkbox" name="auto_relogin" {{ 'checked' if values.auto_relogin }}> Daily automatic re-login before market open</label></div>
+    </div>
+  </fieldset>
+  <fieldset><legend>{{ broker_name }} credentials</legend>
+    {% if masked %}<p class="small muted">Saved secrets: {% for k, v in masked.items() %}<code>{{ k }}={{ v }}</code> {% endfor %} — leave secret fields blank to keep them.</p>{% endif %}
+    <div class="fields">{% for f in cred_fields %}{{ m.field(f) }}{% endfor %}</div>
+  </fieldset>
+  <fieldset><legend>Account risk limits</legend>
+    <div class="fields">{% for f in risk_fields %}{{ m.field(f) }}{% endfor %}</div>
+  </fieldset>
+  <div class="row"><button class="primary" type="submit">Save</button><a class="btn" href="/accounts">Cancel</a></div>
+</form>
+{% endblock %}

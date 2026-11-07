@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Broker accounts{% endblock %}
+{% block content %}
+<div class="row" style="margin-bottom:12px">
+  <h1 style="margin:0">Broker accounts</h1><div class="spacer"></div>
+  {% if is_admin %}
+  <form method="get" action="/accounts/new" class="row">
+    <select name="broker">{% for k, n, stub in brokers %}<option value="{{ k }}">{{ n }}</option>{% endfor %}</select>
+    <button class="primary" type="submit">+ Add account</button>
+  </form>
+  {% endif %}
+</div>
+<p class="muted small">Credentials are encrypted at rest with the master key from <code>ALGO_MASTER_KEY</code> and are only ever shown masked. ⦿ = current market-data feed.</p>
+<div class="panel">
+<table>
+  <thead><tr><th></th><th>Label</th><th>Broker</th><th>Client ID</th><th>Status</th><th class="num">Funds</th><th>Last login</th><th>Order sync</th><th>Used by</th><th></th></tr></thead>
+  <tbody>
+  {% for it in items %}
+    <tr>
+      <td><span class="dot {{ it.indicator }}"></span></td>
+      <td><b>{{ it.row.label }}</b>{% if it.is_feed %} <span class="badge paper" title="streams market data for all instances">⦿ data feed</span>{% elif it.designated_feed %} <span class="badge amber">designated feed (inactive)</span>{% endif %}
+        {% if it.row.kill_switch %} <span class="badge red">KILL SWITCH</span>{% endif %}
+        {% if not it.row.enabled %} <span class="badge grey">disabled</span>{% endif %}</td>
+      <td>{{ it.broker_name }}{% if it.stub %} <span class="badge amber">not implemented</span>{% endif %}</td>
+      <td class="mono">{{ it.client_id_masked or '–' }}</td>
+      <td><span class="badge {{ it.rt.status if it.rt else it.row.status }}">{{ it.rt.status if it.rt else it.row.status }}</span>
+        {% if (it.rt and it.rt.last_error) or it.row.last_error %}<div class="small neg">{{ it.rt.last_error if it.rt and it.rt.last_error else it.row.last_error }}</div>{% endif %}</td>
+      <td class="num">{{ (it.rt.funds if it.rt else it.row.funds_available)|money }}</td>
+      <td class="small">{{ (it.rt.last_login_at if it.rt else it.row.last_login_at)|dt }}</td>
+      <td class="small">{{ it.rt.last_order_sync_at|dt if it.rt else '–' }}</td>
+      <td class="small">{{ it.instances|join(', ') or '–' }}</td>
+      <td class="nowrap">
+        {% if is_admin %}
+          <button class="small" hx-post="/accounts/{{ it.row.id }}/test" hx-target="#test-{{ it.row.id }}" hx-swap="innerHTML" hx-indicator="#test-{{ it.row.id }}">Test connection</button>
+          <a class="btn small" href="/accounts/{{ it.row.id }}/edit">Edit</a>
+          {% if not it.designated_feed %}<form method="post" action="/accounts/{{ it.row.id }}/feed" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="small" type="submit">Use as data feed</button></form>{% endif %}
+          <form method="post" action="/accounts/{{ it.row.id }}/reconnect" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="small" type="submit">Reconnect</button></form>
+          {% if it.row.kill_switch %}<button class="small" data-kill="reset-account" data-id="{{ it.row.id }}">Reset kill</button>
+          {% else %}<button class="small danger" data-kill="account" data-id="{{ it.row.id }}" data-name="{{ it.row.label }}">Kill</button>{% endif %}
+          <form method="post" action="/accounts/{{ it.row.id }}/delete" class="inline-form" data-confirm="Delete {{ it.row.label }} and its stored credentials?" data-danger="1"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="small danger" type="submit">Delete</button></form>
+          <div id="test-{{ it.row.id }}" class="small" style="margin-top:4px"></div>
+        {% endif %}
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="10" class="muted">No broker accounts yet. Add an Angel One account, or a Paper account with “Simulate market data” to try the platform without a broker.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="small muted">Accounts with “auto re-login” log in again every trading day at the time set in Global Settings (default 08:45), before the market opens.</p>
+{% endblock %}

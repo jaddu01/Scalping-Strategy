@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Strategies{% endblock %}
+{% block content %}
+<div class="row" style="margin-bottom:12px">
+  <h1 style="margin:0">Strategy instances</h1><div class="spacer"></div>
+  {% if is_admin %}
+  <form method="get" action="/strategies/new" class="row">
+    <select name="template">{% for k, n in templates_list %}<option value="{{ k }}">{{ n }}</option>{% endfor %}</select>
+    <button class="primary" type="submit">+ New instance</button>
+  </form>
+  {% endif %}
+</div>
+<div class="panel">
+<table>
+  <thead><tr><th>Name</th><th>Template</th><th>Broker account</th><th>Mode</th><th>Enabled</th><th>Status</th><th></th></tr></thead>
+  <tbody>
+  {% for it in items %}
+    <tr>
+      <td><a href="/strategies/{{ it.row.id }}">{{ it.row.name }}</a>{% if it.open %} <span class="badge IN_TRADE">open position</span>{% endif %}</td>
+      <td class="small">{{ it.row.template_id }}</td>
+      <td>{{ it.account }}</td>
+      <td><span class="badge {{ it.row.mode }}">{{ it.row.mode|upper }}</span></td>
+      <td>{% if is_admin %}<label class="switch"><input type="checkbox" class="inst-toggle" data-id="{{ it.row.id }}" data-mode="{{ it.row.mode }}" data-name="{{ it.row.name }}" {{ 'checked' if it.row.enabled }}><span></span></label>{% else %}{{ 'on' if it.row.enabled else 'off' }}{% endif %}</td>
+      <td><span class="badge {{ it.status }}">{{ it.status }}</span></td>
+      <td class="nowrap">
+        {% if is_admin %}
+        <a class="btn small" href="/strategies/{{ it.row.id }}/edit">Edit</a>
+        <form method="post" action="/strategies/{{ it.row.id }}/clone" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="small" type="submit">Clone</button></form>
+        <form method="post" action="/strategies/{{ it.row.id }}/delete" class="inline-form" data-confirm="Delete {{ it.row.name }}? Its trade history is kept." data-danger="1"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="small danger" type="submit">Delete</button></form>
+        {% endif %}
+        <a class="btn small" href="/backtest?instance_id={{ it.row.id }}">Backtest</a>
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="7" class="muted">No instances yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

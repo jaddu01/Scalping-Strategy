@@ -1,0 +1,30 @@
+[Unit]
+Description=Algo trading platform (web UI + trading engine)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=algo
+Group=algo
+WorkingDirectory=/opt/algo_platform
+ExecStart=/opt/algo_platform/.venv/bin/python /opt/algo_platform/run.py
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=5
+# give open-position bookkeeping time to finish on stop/restart
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+# hardening: the app can only write its data and log folders
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/algo_platform/data /opt/algo_platform/logs
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

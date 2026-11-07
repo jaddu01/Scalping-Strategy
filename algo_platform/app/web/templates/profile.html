@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% import "macros.html" as m with context %}
+{% block title %}Profile{% endblock %}
+{% block content %}
+<h1>Your profile</h1>
+{% if must_change %}<div class="flash err">You must set a new password before continuing.</div>{% endif %}
+<div class="grid2">
+  <div class="panel">
+    <h2>Change password</h2>
+    <form method="post" action="/profile/password" class="stack">
+      {{ m.csrf() }}
+      <div class="field"><label>Current password</label><input type="password" name="current" autocomplete="current-password" required></div>
+      <div class="field"><label>New password</label><input type="password" name="new" autocomplete="new-password" required></div>
+      <div class="field"><label>Repeat new password</label><input type="password" name="new2" autocomplete="new-password" required></div>
+      <button class="primary" type="submit">Change password</button>
+    </form>
+  </div>
+  <div class="panel">
+    <h2>Two-factor authentication (TOTP)</h2>
+    {% if totp_enabled %}
+      <p><span class="badge green">enabled</span> Sign-in asks for a code from your authenticator app.</p>
+      <form method="post" action="/profile/totp/disable" class="stack" data-confirm="Disable two-factor authentication?" data-danger="1">
+        {{ m.csrf() }}
+        <div class="field"><label>Current code (to confirm)</label><input type="text" name="code" inputmode="numeric" required></div>
+        <button class="danger" type="submit">Disable 2FA</button>
+      </form>
+    {% elif totp_setup %}
+      <p>Scan this QR code with Google Authenticator, Authy, 1Password, etc., then enter the 6-digit code.</p>
+      <div class="qr">{{ totp_qr|safe }}</div>
+      <p class="small muted">Manual key: <code>{{ totp_secret }}</code></p>
+      <form method="post" action="/profile/totp/confirm" class="stack">
+        {{ m.csrf() }}
+        <div class="field"><label>Code</label><input type="text" name="code" inputmode="numeric" required></div>
+        <button class="primary" type="submit">Confirm and enable</button>
+      </form>
+    {% else %}
+      <p class="muted">Add a second factor to app sign-in (this is separate from your broker's TOTP).</p>
+      <form method="post" action="/profile/totp/start">{{ m.csrf() }}<button class="primary" type="submit">Set up 2FA</button></form>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

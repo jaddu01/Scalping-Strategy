@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}{{ inst.name }}{% endblock %}
+{% block content %}
+<div class="row" style="margin-bottom:10px">
+  <h1 style="margin:0">{{ inst.name }}</h1>
+  <span class="badge {{ inst.mode }}">{{ inst.mode|upper }}</span>
+  <span class="badge {{ rt.status if rt else inst.status }}">{{ rt.status if rt else inst.status }}</span>
+  {% if open_position %}<span class="badge IN_TRADE">open position</span>{% endif %}
+  <div class="spacer"></div>
+  {% if is_admin %}
+    <label class="inline">Enabled <label class="switch"><input type="checkbox" class="inst-toggle" data-id="{{ inst.id }}" data-mode="{{ inst.mode }}" data-name="{{ inst.name }}" {{ 'checked' if inst.enabled }}><span></span></label></label>
+    <a class="btn" href="/strategies/{{ inst.id }}/edit">Edit</a>
+    <button class="danger" data-kill="instance" data-id="{{ inst.id }}" data-name="{{ inst.name }}">Kill switch</button>
+  {% endif %}
+  <a class="btn" href="/logs?instance_id={{ inst.id }}">Logs</a>
+  <a class="btn" href="/backtest?instance_id={{ inst.id }}">Backtest</a>
+</div>
+<p class="muted">{{ template.display_name }} · broker: {{ account.label if account else '— none —' }}{% if inst.notes %} · {{ inst.notes }}{% endif %}</p>
+{% if rt and rt.message %}<div class="flash {{ 'err' if rt.status == 'ERROR' else 'ok' }}">{{ rt.message }}</div>{% endif %}
+
+<div class="panel">
+  <h2 style="margin-top:0">Today's slots</h2>
+  <div hx-get="/strategies/{{ inst.id }}/slots" hx-trigger="load, every 3s" hx-swap="innerHTML"><span class="muted">loading…</span></div>
+</div>
+
+<div class="grid2">
+  <div class="panel"><h2 style="margin-top:0">Parameters</h2>
+    <table>{% for k, v in params.items() %}<tr><th>{{ k }}</th><td class="mono">{{ v if v is not iterable or v is string else v|join(', ') }}</td></tr>{% endfor %}</table></div>
+  <div class="panel"><h2 style="margin-top:0">Risk limits</h2>
+    <table>{% for k, v in risk.items() %}<tr><th>{{ k }}</th><td class="mono">{{ v }}</td></tr>{% endfor %}</table></div>
+</div>
+
+<div class="panel">
+  <h2 style="margin-top:0">Recent trades</h2>
+  <table>
+    <thead><tr><th>Trade</th><th>Date</th><th>Slot</th><th>Dir</th><th>Symbol</th><th class="num">Qty</th><th class="num">Entry</th><th class="num">Exit</th><th>Reason</th><th class="num">Gross</th><th class="num">Net</th><th>Status</th></tr></thead>
+    <tbody>
+    {% for t in trades %}
+      <tr><td><a href="/trades/{{ t.trade_ref }}">{{ t.trade_ref }}</a></td><td>{{ t.trade_date }}</td><td>{{ t.slot_id.split('#')[-1] if t.slot_id else '' }}</td>
+        <td>{{ t.direction }}</td><td>{{ t.tradingsymbol }}</td><td class="num">{{ t.quantity }}</td>
+        <td class="num">{{ t.entry_price|money }}</td><td class="num">{{ t.exit_price|money }}</td><td>{{ t.exit_reason or '' }}</td>
+        <td class="num {{ t.gross_pnl|pnlc }}">{{ t.gross_pnl|money }}</td><td class="num {{ t.net_pnl|pnlc }}">{{ t.net_pnl|money }}</td>
+        <td><span class="badge {{ t.status }}">{{ t.status }}</span></td></tr>
+    {% else %}<tr><td colspan="12" class="muted">No trades yet.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="panel">
+  <h2 style="margin-top:0">Recent orders</h2>
+  <table>
+    <thead><tr><th>Time</th><th>Order ID</th><th>Trade</th><th>Purpose</th><th>Side</th><th>Type</th><th>Symbol</th><th class="num">Qty</th><th class="num">Filled</th><th class="num">Avg</th><th class="num">Trigger</th><th>Status</th></tr></thead>
+    <tbody>
+    {% for o in orders %}
+      <tr><td class="small">{{ o.updated_at|dt }}</td><td class="mono">{{ o.broker_order_id }}{% if o.paper %} <span class="badge paper">paper</span>{% endif %}</td>
+        <td>{% if o.trade_ref %}<a href="/trades/{{ o.trade_ref }}">{{ o.trade_ref }}</a>{% endif %}</td><td>{{ o.purpose }}</td>
+        <td>{{ o.side }}</td><td>{{ o.order_type }}</td><td>{{ o.tradingsymbol }}</td><td class="num">{{ o.quantity }}</td>
+        <td class="num">{{ o.filled_quantity }}</td><td class="num">{{ o.average_price|money }}</td><td class="num">{{ o.trigger_price|money }}</td>
+        <td><span class="badge {{ o.status }}">{{ o.status }}</span>{% if o.status_message %}<div class="small muted">{{ o.status_message }}</div>{% endif %}</td></tr>
+    {% else %}<tr><td colspan="12" class="muted">No orders yet.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

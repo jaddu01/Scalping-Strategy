@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}{{ t.trade_ref }}{% endblock %}
+{% block content %}
+<div class="row" style="margin-bottom:10px"><h1 style="margin:0">Trade {{ t.trade_ref }}</h1>
+  <span class="badge {{ t.status }}">{{ t.status }}</span><span class="badge {{ t.mode }}">{{ t.mode }}</span>
+  <div class="spacer"></div><a class="btn" href="/logs?trade_id={{ t.trade_ref }}">All logs</a></div>
+<div class="cards">
+  <div class="card"><div class="k">Direction / symbol</div><div class="v" style="font-size:15px">{{ t.direction }} · {{ t.tradingsymbol }}</div></div>
+  <div class="card"><div class="k">Instance / broker</div><div class="v" style="font-size:15px">{{ inst.get(t.instance_id, '–') }} · {{ acc.get(t.account_id, '–') }}</div></div>
+  <div class="card"><div class="k">Qty ({{ t.lots }} lots × {{ t.lot_size }})</div><div class="v">{{ t.quantity }}</div></div>
+  <div class="card"><div class="k">Entry → exit premium</div><div class="v">{{ t.entry_price|money }} → {{ t.exit_price|money }}</div></div>
+  <div class="card"><div class="k">Gross / net P&amp;L</div><div class="v"><span class="{{ t.gross_pnl|pnlc }}">{{ t.gross_pnl|money }}</span> / <span class="{{ t.net_pnl|pnlc }}">{{ t.net_pnl|money }}</span></div></div>
+  <div class="card"><div class="k">Exit reason</div><div class="v" style="font-size:15px">{{ t.exit_reason or '–' }}</div></div>
+</div>
+<div class="grid2">
+<div class="panel">
+  <h2 style="margin-top:0">Timeline</h2>
+  <ul class="timeline">
+  {% for e in events %}
+    <li class="{{ e.level }}"><span class="mono">{{ e.time }}</span> <b>{{ e.category }} {{ e.event_type }}</b>{% if e.latency_ms is not none %}<span class="lat">+{{ e.latency_ms }} ms</span>{% endif %}
+      <div class="mono small">{{ e.message }}</div>
+      {% if e.payload %}<details><summary>payload</summary><pre>{{ e.payload|tojson_pretty }}</pre></details>{% endif %}</li>
+  {% else %}<li class="muted">No events recorded.</li>{% endfor %}
+  </ul>
+</div>
+<div class="panel">
+  <h2 style="margin-top:0">Plan</h2>
+  <table>
+    <tr><th>Slot</th><td>{{ t.slot_id }}</td></tr>
+    <tr><th>Signal</th><td>{{ t.signal_time|dt }} · spot {{ t.signal_spot|money }} · trigger {{ t.signal_trigger|money }} · premium {{ t.signal_premium|money }}</td></tr>
+    <tr><th>Spot SL</th><td>{{ t.spot_sl|money }} ({{ 'exit if spot ≤' if t.spot_sl_side == 'below' else 'exit if spot ≥' }})</td></tr>
+    <tr><th>Take-profit</th><td>{{ t.tp_spot_level|money if t.tp_spot_level else (t.tp_premium_level|money ~ ' premium' if t.tp_premium_level else '–') }}</td></tr>
+    <tr><th>Hard exit</th><td>{{ t.exit_at|dt('%H:%M') }}</td></tr>
+    <tr><th>Protective SL</th><td>{{ t.protective_sl_order_id or '–' }} · trigger {{ t.protective_sl_trigger|money }} · {{ t.protective_sl_status or '' }}</td></tr>
+    <tr><th>Entry / exit time</th><td>{{ t.entry_time|dt }} → {{ t.exit_time|dt }}</td></tr>
+    <tr><th>Charges</th><td>{{ t.charges|money }}</td></tr>
+  </table>
+  <h3>Orders</h3>
+  <table><thead><tr><th>Order</th><th>Purpose</th><th>Side</th><th>Type</th><th class="num">Qty</th><th class="num">Avg</th><th>Status</th></tr></thead>
+  <tbody>{% for o in orders %}<tr><td class="mono small">{{ o.broker_order_id }}</td><td>{{ o.purpose }}</td><td>{{ o.side }}</td><td>{{ o.order_type }}</td><td class="num">{{ o.filled_quantity }}/{{ o.quantity }}</td><td class="num">{{ o.average_price|money }}</td><td><span class="badge {{ o.status }}">{{ o.status }}</span></td></tr>{% endfor %}</tbody></table>
+</div>
+</div>
+{% endblock %}

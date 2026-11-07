@@ -1,0 +1,1 @@
+<span class="{{ 'pos' if res.ok else 'neg' }}">{{ '✔' if res.ok else '✖' }} {{ res.message }}{% if res.funds is defined and res.funds is not none %} · funds ₹{{ res.funds|money }}{% endif %}</span>

@@ -1,0 +1,26 @@
+# Web
+fastapi>=0.115
+uvicorn[standard]>=0.30
+jinja2>=3.1
+python-multipart>=0.0.9
+# Data
+sqlalchemy>=2.0
+alembic>=1.13
+pydantic>=2.7
+pyyaml>=6.0
+# Security
+argon2-cffi>=23.1
+cryptography>=42
+pyotp>=2.9
+qrcode>=7.4
+# Brokers
+smartapi-python>=1.5
+websocket-client>=1.8
+logzero>=1.7
+httpx>=0.27
+# Optional: PostgreSQL instead of SQLite
+# psycopg[binary]>=3.1
+# Tests
+pytest>=8
+pytest-asyncio>=0.23
+pytest-timeout>=2.3
