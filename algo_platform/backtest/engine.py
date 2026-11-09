@@ -21,7 +21,7 @@ from core.events import Category, Level
 from core.options_math import next_weekly_expiries, option_premium
 from core.settings_schema import Charges
 from engine.charges import option_charges
-from engine.exit_manager import ExitState, evaluate_exit
+from engine.exit_manager import ExitState, evaluate_exit, evaluate_partial
 from engine.market_data import series_of
 from strategies.base import EntrySignal, Strategy, TradeInfo
 from strategies.registry import get_template
@@ -77,6 +77,8 @@ class SimTrade:
     charges: float | None = None
     net: float | None = None
     meta: dict[str, Any] = field(default_factory=dict)
+    open_qty: int = 0
+    partial_fills: list[dict[str, Any]] = field(default_factory=list)  # TP1/TP2 scale-outs
 
     def as_dict(self) -> dict[str, Any]:
         return {"trade_id": self.trade_id, "day": self.day.isoformat(), "slot": self.meta.get("slot_no"),
@@ -89,6 +91,7 @@ class SimTrade:
                 "exit_spot": round(self.exit_spot, 2) if self.exit_spot is not None else None,
                 "exit_premium": round(self.exit_premium, 2) if self.exit_premium is not None else None,
                 "exit_reason": self.exit_reason, "spot_points": round(self._points(), 2),
+                "partials": ", ".join(f"{p['label']}:{p['qty']}@{p['premium']:.2f}" for p in self.partial_fills),
                 "gross": self.gross, "charges": self.charges, "net": self.net}
 
     def _points(self) -> float:
@@ -169,12 +172,14 @@ class BacktestContext:
                        option_series="", option_key=signal.option, spot_key=None, entry_price=prem, quantity=qty,
                        exit_at=min(plan.exit_at, sq), square_off_at=sq, spot_sl=plan.spot_sl,
                        spot_sl_side=plan.spot_sl_side, tp_spot_level=plan.tp_spot_level, tp_spot_side=plan.tp_spot_side,
-                       tp_premium_level=round(prem * (1 + plan.tp_premium_pct / 100), 2) if plan.tp_premium_pct else None)
+                       tp_premium_level=round(prem * (1 + plan.tp_premium_pct / 100), 2) if plan.tp_premium_pct else None,
+                       partials=[{"label": p.label, "level": p.spot_level, "side": p.side, "qty": p.lots * self.cfg.lot_size,
+                                  "done": False} for p in plan.partial_targets])
         trade = SimTrade(trade_id=tid, slot_id=signal.slot_id, day=self.now().date(), direction=signal.direction.value,
                          symbol=symbol, strike=signal.option.strike or 0.0, expiry=signal.option.expiry or self.now().date(),
                          lots=signal.lots, qty=qty, signal_time=self.now(), entry_spot=signal.spot,
                          trigger=signal.trigger, entry_premium=prem, spot_sl=plan.spot_sl, exit_at=st.exit_at, state=st,
-                         meta=dict(signal.meta))
+                         meta=dict(signal.meta), open_qty=qty)
         trade.meta["protective_floor"] = (prem * (1 - plan.protective_sl_pct / 100)) if plan.protective_sl_pct else None
         self.open = trade
         self.trades.append(trade)
@@ -193,15 +198,31 @@ class BacktestContext:
         floor = t.meta.get("protective_floor")
         if reason is None and floor and prem <= floor:
             reason = "protective_sl"
-        if reason is None:
-            return
         out = prem * (1 - self.cfg.slippage_pct / 100)
-        t.exit_time, t.exit_spot, t.exit_premium, t.exit_reason = self.now(), self.spot_price, out, reason
-        t.gross = round((out - t.entry_premium) * t.qty, 2)
-        t.charges = option_charges(self.cfg.charges, t.entry_premium * t.qty, out * t.qty).total
+        if reason is None:
+            # same scale-out rule as the live exit manager: TP1, TP2 ... sell part of the position
+            idx = evaluate_partial(t.state, self.spot_price)
+            while idx is not None and t.open_qty > 0:
+                p = t.state.partials[idx]
+                p["done"] = True
+                q = min(int(p["qty"]), t.open_qty)
+                t.open_qty -= q
+                t.partial_fills.append({"label": p["label"], "qty": q, "premium": out, "time": self.now()})
+                self.emit("PARTIAL_EXIT", f"{p['label'].upper()} sold qty={q} price={out:.2f} "
+                          f"pnl={(out - t.entry_premium) * q:.2f} remaining={t.open_qty}", trade_id=t.trade_id)
+                idx = evaluate_partial(t.state, self.spot_price)
+            if t.open_qty > 0:
+                return
+            reason = t.partial_fills[-1]["label"]
+        sold_value = sum(p["qty"] * p["premium"] for p in t.partial_fills) + out * t.open_qty
+        t.exit_time, t.exit_spot, t.exit_reason = self.now(), self.spot_price, reason
+        t.exit_premium = sold_value / t.qty  # average over all exits, as the live P&L is computed
+        t.open_qty = 0
+        t.gross = round(sold_value - t.entry_premium * t.qty, 2)
+        t.charges = option_charges(self.cfg.charges, t.entry_premium * t.qty, sold_value).total
         t.net = round(t.gross - t.charges, 2)
         self.open = None
-        self.emit("EXIT", f"EXIT reason={reason} premium_in={t.entry_premium:.2f} premium_out={out:.2f} pnl={t.gross:.2f}",
+        self.emit("EXIT", f"EXIT reason={reason} premium_in={t.entry_premium:.2f} premium_out={t.exit_premium:.2f} pnl={t.gross:.2f}",
                   trade_id=t.trade_id)
         if self.strategy is not None:
             await self.strategy.on_trade_update(TradeInfo(trade_id=t.trade_id, slot_id=t.slot_id, direction=t.direction,

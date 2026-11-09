@@ -42,6 +42,16 @@ class TakeProfitMode(str, Enum):
 
 
 @dataclass
+class PartialTarget:
+    """Sell `lots` of the position when spot reaches `spot_level` (e.g. TP1, TP2). The rest stays open."""
+
+    label: str  # "tp1", "tp2" — also the exit reason if this target closes the last lots
+    spot_level: float
+    side: str  # "above": hit when spot >= level (CE); "below": hit when spot <= level (PE)
+    lots: int
+
+
+@dataclass
 class ExitPlan:
     """Everything the exit manager needs to close a position without asking the strategy."""
 
@@ -53,6 +63,7 @@ class ExitPlan:
     tp_spot_side: str = "above"  # "above": exit when spot >= level; "below": exit when spot <= level
     tp_premium_pct: float | None = None  # exit when premium >= fill * (1 + pct/100)
     protective_sl_pct: float | None = None  # broker-side disaster SL on premium
+    partial_targets: list[PartialTarget] = field(default_factory=list)  # scale-out levels, in order
 
 
 @dataclass

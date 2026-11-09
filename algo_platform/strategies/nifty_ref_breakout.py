@@ -27,6 +27,7 @@ from strategies.base import (
     Direction,
     EntrySignal,
     ExitPlan,
+    PartialTarget,
     Strategy,
     StrategySettings,
     TakeProfitMode,
@@ -484,6 +485,7 @@ class NiftyRefBreakout(Strategy):
                 exit_at=s.exit_at, underlying=self.spot, spot_sl=sl_level, spot_sl_side=sl_side,
                 tp_spot_level=tp_level, tp_spot_side=tp_side, tp_premium_pct=tp_pct,
                 protective_sl_pct=self.settings.protective_sl_pct or None,
+                partial_targets=self.partial_targets(direction, spot, s.ref),
             ),
             meta={"slot_no": s.no, "underlying": self.settings.underlying, "ref_start": fmt_hm(s.ref_start), "ref_high": s.ref.high, "ref_low": s.ref.low,
                   "buffer": self.settings.buffer_points, "trigger_price": price},
@@ -499,6 +501,10 @@ class NiftyRefBreakout(Strategy):
             s.state, s.result = SlotState.DONE, info.exit_reason
         else:
             s.state, s.result = SlotState.DONE, info.exit_reason or "entry_failed"
+
+    def partial_targets(self, direction: Direction, entry_spot: float, ref: Candle) -> list[PartialTarget]:
+        """Scale-out levels (TP1, TP2, ...) for a new trade. None by default; TP variants override this."""
+        return []
 
     async def on_trade_update(self, trade: TradeInfo) -> None:
         for s in self.slots:

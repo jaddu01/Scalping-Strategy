@@ -106,10 +106,10 @@ def create_app(config: AppConfig | None = None, *, start_engine: bool | None = N
 
     from app.api import routes as api_routes
     from app.api import ws as ws_routes
-    from app.web import (routes_accounts, routes_admin, routes_auth, routes_backtest, routes_dashboard,
-                         routes_logs, routes_settings, routes_strategies, routes_trades)
+    from app.web import (routes_accounts, routes_admin, routes_auth, routes_backtest, routes_compare,
+                         routes_dashboard, routes_logs, routes_settings, routes_strategies, routes_trades)
 
-    for mod in (routes_auth, routes_dashboard, routes_strategies, routes_accounts, routes_settings, routes_trades,
+    for mod in (routes_auth, routes_dashboard, routes_strategies, routes_compare, routes_accounts, routes_settings, routes_trades,
                 routes_logs, routes_backtest, routes_admin, api_routes, ws_routes):
         app.include_router(mod.router)
     return app

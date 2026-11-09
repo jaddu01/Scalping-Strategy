@@ -23,7 +23,7 @@
 <table><thead><tr><th>#</th><th>Day</th><th>Slot</th><th>Ref</th><th>Dir</th><th>Strike</th><th>Signal</th><th class="num">Spot</th><th class="num">SL</th><th class="num">Prem in</th><th>Exit</th><th class="num">Exit spot</th><th class="num">Prem out</th><th>Reason</th><th class="num">Pts</th><th class="num">Gross</th><th class="num">Net</th></tr></thead>
 <tbody>{% for t in res.trades %}<tr><td>{{ t.trade_id }}</td><td class="nowrap">{{ t.day }}</td><td>{{ t.slot }}</td><td>{{ t.ref_start }}</td><td>{{ t.direction }}</td><td>{{ t.strike }}</td><td>{{ t.signal_time }}</td>
   <td class="num">{{ t.entry_spot|money }}</td><td class="num">{{ t.spot_sl|money }}</td><td class="num">{{ t.entry_premium|money }}</td><td>{{ t.exit_time }}</td><td class="num">{{ t.exit_spot|money }}</td>
-  <td class="num">{{ t.exit_premium|money }}</td><td class="small">{{ t.exit_reason }}</td><td class="num {{ t.spot_points|pnlc }}">{{ t.spot_points }}</td>
+  <td class="num">{{ t.exit_premium|money }}</td><td class="small">{{ t.exit_reason }}{% if t.partials %}<br>{{ t.partials }}{% endif %}</td><td class="num {{ t.spot_points|pnlc }}">{{ t.spot_points }}</td>
   <td class="num {{ t.gross|pnlc }}">{{ t.gross|money }}</td><td class="num {{ t.net|pnlc }}">{{ t.net|money }}</td></tr>
 {% else %}<tr><td colspan="17" class="muted">No trades.</td></tr>{% endfor %}</tbody></table></div>
 <details class="panel"><summary>Strategy log ({{ res.events|length }} lines)</summary><pre>{% for e in res.events %}[{{ e.time }}] {{ e.message }}

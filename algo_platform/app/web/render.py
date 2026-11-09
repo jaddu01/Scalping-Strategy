@@ -19,6 +19,7 @@ templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 NAV = [
     ("/", "Dashboard", False),
     ("/strategies", "Strategies", False),
+    ("/compare", "Compare", False),
     ("/accounts", "Broker accounts", False),
     ("/trades", "Trades & Orders", False),
     ("/logs", "Logs", False),

@@ -75,6 +75,9 @@ class LiveTrade:
     missing_obs: int = 0
     product: ProductType = ProductType.INTRADAY
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # scale-out targets (TP1, TP2): dicts {label, level, side, qty, done, filled, price}
+    partials: list[dict[str, Any]] = field(default_factory=list)
+    partial_busy: bool = False  # a partial exit order is in flight (position check must wait)
 
     @property
     def option_series(self) -> str:
@@ -234,6 +237,9 @@ class TradeManager:
                         exit_at=min(plan.exit_at, sq), status="PENDING_ENTRY",
                         meta={**signal.meta, "protective_sl_pct": plan.protective_sl_pct,
                               "plan_exit_at": plan.exit_at.isoformat(), "tick_size": inst.tick_size,
+                              "partials": [{"label": p.label, "level": p.spot_level, "side": p.side,
+                                            "qty": p.lots * inst.lot_size, "done": False, "filled": 0,
+                                            "price": None} for p in plan.partial_targets],
                               "spot_key": plan.underlying and {"underlying": plan.underlying.underlying,
                                                                "exchange": plan.underlying.exchange.value,
                                                                "instrument_type": plan.underlying.instrument_type.value}})
@@ -284,7 +290,9 @@ class TradeManager:
             exit_at=min(plan.exit_at, sq), spot_sl=plan.spot_sl, spot_sl_side=plan.spot_sl_side,
             tp_spot_level=plan.tp_spot_level, tp_spot_side=plan.tp_spot_side,
             tp_premium_level=round(entry_price * (1 + plan.tp_premium_pct / 100), 2) if plan.tp_premium_pct else None,
-            protective_pct=plan.protective_sl_pct)
+            protective_pct=plan.protective_sl_pct,
+            partials=[{"label": p.label, "level": p.spot_level, "side": p.side, "qty": p.lots * inst.lot_size,
+                       "done": False, "filled": 0, "price": None} for p in plan.partial_targets])
         self.live[trade_id] = lt
         self._save(lt, status="OPEN", quantity=filled, open_quantity=filled, entry_price=entry_price,
                    entry_time=lt.entry_time, entry_order_id=placed.order_id, tp_premium_level=lt.tp_premium_level)
@@ -362,11 +370,14 @@ class TradeManager:
             exit_at=lt.exit_at, square_off_at=sq, spot_sl=lt.spot_sl, spot_sl_side=lt.spot_sl_side,
             tp_spot_level=lt.tp_spot_level, tp_spot_side=lt.tp_spot_side, tp_premium_level=lt.tp_premium_level,
             last_spot=self.market.ltp(lt.spot_key) if lt.spot_key else None,
-            last_premium=self.market.ltp(lt.option_series)))
+            last_premium=self.market.ltp(lt.option_series), partials=lt.partials))
 
 
-    async def _place_protective(self, lt: LiveTrade, adapter: Any, sync: BrokerSync) -> None:
+    async def _place_protective(self, lt: LiveTrade, adapter: Any, sync: BrokerSync, qty: int | None = None) -> None:
         if not lt.protective_pct:
+            return
+        qty = lt.open_qty if qty is None else qty
+        if qty <= 0:
             return
         trigger = round_to_tick(lt.entry_price * (1 - lt.protective_pct / 100), lt.tick_size, "down")
         if trigger < lt.tick_size:
@@ -374,7 +385,7 @@ class TradeManager:
         inst = adapter.find_instrument(lt.exchange, lt.token) or adapter.resolve_symbol(lt.option_key)
         for order_type in (OrderType.SL_M, OrderType.SL):
             limit = round_to_tick(trigger * 0.95, lt.tick_size, "down") if order_type is OrderType.SL else None
-            req = OrderRequest(instrument=inst, side=Side.SELL, quantity=lt.open_qty, order_type=order_type,
+            req = OrderRequest(instrument=inst, side=Side.SELL, quantity=qty, order_type=order_type,
                                product=lt.product, trigger_price=trigger, price=limit,
                                tag=make_tag(lt.instance_id or 0, lt.id, "PROTECTIVE_SL"))
             placed = await self.orders.place(adapter, sync, req, purpose="PROTECTIVE_SL", trade_db_id=lt.id,
@@ -486,6 +497,121 @@ class TradeManager:
             await self._finalize(lt, reason, sync)
             return True
 
+    async def exit_partial(self, trade_db_id: int, idx: int, *, spot: float | None = None,
+                           premium: float | None = None) -> bool:
+        """Sell one scale-out target's quantity (TP1 / TP2) at market; the rest of the position stays open.
+
+        The broker-side protective SL is shrunk to the quantity that will remain BEFORE the sell, so the
+        stop can never sell more than we hold (which would leave a short option position).
+        """
+        lt = self.live.get(trade_db_id)
+        if lt is None or not 0 <= idx < len(lt.partials):
+            return False
+        p = lt.partials[idx]
+        async with lt.lock:
+            if lt.status != "OPEN" or trade_db_id not in self.live:
+                return False
+            qty = min(int(p["qty"]), lt.open_qty)
+            if qty <= 0:
+                return False
+            lt.partial_busy = True
+            try:
+                self._emit(Category.EXIT, "PARTIAL_TRIGGERED",
+                           f"reason={p['label']} level={p['level']:.2f} spot={_f(spot)} premium={_f(premium)} "
+                           f"qty={qty} ({qty // max(1, lt.lot_size)} lots) of {lt.open_qty}", lt=lt,
+                           reason=p["label"], level=p["level"], spot=spot, premium=premium, quantity=qty)
+                try:
+                    acc, adapter, sync = self._route(lt)
+                except Exception as exc:
+                    self._emit(Category.ERROR, "PARTIAL_EXIT_FAILED", f"no route to broker: {exc}", Level.ERROR, lt=lt)
+                    return False
+                await self._resize_protective(lt, adapter, sync, lt.open_qty - qty)
+                inst = adapter.find_instrument(lt.exchange, lt.token) or adapter.resolve_symbol(lt.option_key)
+                age = self.market.ltp_age(lt.option_key)
+                if age is None or age > 5:
+                    await self.market.fetch_ltp(lt.option_key)
+                req = OrderRequest(instrument=inst, side=Side.SELL, quantity=qty, order_type=OrderType.MARKET,
+                                   product=lt.product, tag=make_tag(lt.instance_id or 0, lt.id, "EXIT"))
+                placed = await self.orders.place(adapter, sync, req, purpose="EXIT", trade_db_id=lt.id,
+                                                 trade_ref=lt.ref, instance_id=lt.instance_id,
+                                                 instance_name=lt.instance_name, signal_price=premium,
+                                                 lots=qty // max(1, lt.lot_size))
+                filled, price = 0, None
+                if placed.order_id is not None:
+                    lt.exit_order_ids.append(placed.order_id)
+                    final = await self.orders.wait_terminal(sync, placed.order_id,
+                                                            self.settings().sync.fill_timeout_sec)
+                    if final is not None and not final.status.is_terminal:
+                        final = await self.orders.cancel(adapter, sync, placed.order_id, trade_ref=lt.ref,
+                                                         reason="partial exit not filled in time") or final
+                    filled = final.filled_quantity if final else 0
+                    if filled:
+                        price = self._avg_fill(sync, [placed.order_id]) or (final.average_price if final else None)
+                lt.open_qty = max(0, lt.open_qty - filled)
+                p.update(done=True, filled=filled, price=price)
+                self._save(lt, open_quantity=lt.open_qty)
+                self._save_meta(lt, partials=lt.partials)
+                st = self.exits.states.get(lt.id)
+                if st is not None:
+                    st.quantity = lt.open_qty
+                if filled < qty:
+                    # sell failed (fully or partly): put the stop back on what we actually hold
+                    await self._resize_protective(lt, adapter, sync, lt.open_qty)
+                    self._emit(Category.ERROR, "PARTIAL_EXIT_FAILED",
+                               f"{p['label']}: sold {filled}/{qty}; {lt.open_qty} units stay open with the spot SL "
+                               f"and timed exit", Level.ERROR, lt=lt, reason=p["label"], filled=filled, quantity=qty)
+                    if filled == 0:
+                        return False
+                pnl = round((price - lt.entry_price) * filled, 2) if price is not None else None
+                self._emit(Category.POSITION, "PARTIAL_EXIT",
+                           f"{p['label'].upper()} sold qty={filled} price={_f(price)} pnl={_f(pnl)} "
+                           f"remaining={lt.open_qty}", lt=lt, reason=p["label"], quantity=filled, price=price,
+                           pnl=pnl, remaining=lt.open_qty)
+                if lt.open_qty <= 0:
+                    lt.status = "EXITING"
+                    await self._finalize(lt, p["label"], sync)
+                return True
+            finally:
+                lt.partial_busy = False
+
+    async def _resize_protective(self, lt: LiveTrade, adapter: Any, sync: BrokerSync, qty: int) -> None:
+        """Make the broker-side protective SL cover exactly `qty` units (cancel it at 0)."""
+        if not lt.protective_sl_order_id:
+            return
+        sl = sync.orders.get(lt.protective_sl_order_id)
+        if sl is not None and sl.status.is_terminal:
+            return
+        if qty <= 0:
+            lt.cancelling_sl = True
+            await self.orders.cancel(adapter, sync, lt.protective_sl_order_id, trade_ref=lt.ref,
+                                     instance_id=lt.instance_id, reason="position fully scaled out")
+            lt.cancelling_sl = False
+            return
+        from brokers.base import OrderModify
+
+        inst = adapter.find_instrument(lt.exchange, lt.token) or adapter.resolve_symbol(lt.option_key)
+        ok = await self.orders.modify(adapter, sync, OrderModify(
+            order_id=lt.protective_sl_order_id, instrument=inst,
+            order_type=sl.order_type if sl else OrderType.SL_M, quantity=qty, price=sl.price if sl else None,
+            trigger_price=lt.protective_sl_trigger, product=lt.product), trade_ref=lt.ref)
+        if ok:
+            self._emit(Category.ORDER, "SL_RESIZED", f"protective SL {lt.protective_sl_order_id} quantity -> {qty}",
+                       lt=lt, order_id=lt.protective_sl_order_id, quantity=qty)
+            return
+        # modify refused: replace the stop with a new one for the right quantity
+        lt.cancelling_sl = True
+        await self.orders.cancel(adapter, sync, lt.protective_sl_order_id, trade_ref=lt.ref,
+                                 instance_id=lt.instance_id, reason="resize failed; replacing")
+        lt.cancelling_sl = False
+        lt.protective_sl_order_id = None
+        await self._place_protective(lt, adapter, sync, qty)
+
+    def _save_meta(self, lt: LiveTrade, **fields: Any) -> None:
+        with self.db.session() as s:
+            t = s.get(Trade, lt.id)
+            if t is not None:
+                t.meta = {**(t.meta or {}), **fields}
+
     async def _finalize(self, lt: LiveTrade, reason: str, sync: BrokerSync, exit_price: float | None = None) -> None:
         self.exits.unregister(lt.id)
         self.live.pop(lt.id, None)
@@ -515,9 +641,12 @@ class TradeManager:
                                          else lt.protective_sl_status))
         self.realized_today[lt.id] = (lt.instance_id, lt.account_id, gross or 0.0)
         dur = format_duration(now - lt.entry_time) if lt.entry_time else "-"
+        parts = [p for p in lt.partials if p.get("filled")]
+        part_txt = (" partials=" + ",".join(f"{p['label']}:{p['filled']}@{_f(p['price'])}" for p in parts)) if parts else ""
         self._emit(Category.STRATEGY, "EXIT",
-                   f"EXIT reason={reason} premium_in={entry:.2f} premium_out={_f(out)} pnl={_f(gross)}", lt=lt,
-                   reason=reason, premium_in=entry, premium_out=out, pnl=gross)
+                   f"EXIT reason={reason} premium_in={entry:.2f} premium_out={_f(out)} pnl={_f(gross)}{part_txt}", lt=lt,
+                   reason=reason, premium_in=entry, premium_out=out, pnl=gross,
+                   partials=[{k: p[k] for k in ("label", "filled", "price")} for p in parts])
         self._emit(Category.POSITION, "CLOSED",
                    f"entry={entry:.2f} exit={_f(out)} qty={qty} gross={_f(gross)} charges={_f(ch)} net={_f(net)} "
                    f"duration={dur}", lt=lt, entry=entry, exit=out, quantity=qty, gross=gross, charges=ch, net=net,
@@ -585,6 +714,8 @@ class TradeManager:
                 by_token.setdefault(t.token, []).append(t)
             now = self.clock.now()
             for token, trades in by_token.items():
+                if any(t.partial_busy for t in trades):
+                    continue  # a TP1/TP2 sell is in flight; quantities settle once it fills
                 expected = sum(t.open_qty for t in trades if t.status == "OPEN")
                 if expected <= 0:
                     continue
@@ -796,7 +927,8 @@ class TradeManager:
             spot_sl_side=row.spot_sl_side, tp_spot_level=row.tp_spot_level, tp_spot_side=row.tp_spot_side,
             tp_premium_level=row.tp_premium_level, protective_pct=meta.get("protective_sl_pct"),
             protective_sl_order_id=row.protective_sl_order_id, protective_sl_trigger=row.protective_sl_trigger,
-            protective_sl_status=row.protective_sl_status, status="OPEN", exit_order_ids=exit_ids)
+            protective_sl_status=row.protective_sl_status, status="OPEN", exit_order_ids=exit_ids,
+            partials=[dict(p) for p in meta.get("partials") or []])
 
     def today_trade_infos(self, instance_id: int) -> list[TradeInfo]:
         today = self.clock.now().date()

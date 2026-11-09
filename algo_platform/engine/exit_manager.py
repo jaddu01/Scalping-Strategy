@@ -48,6 +48,8 @@ class ExitState:
     last_premium: float | None = None
     triggered: bool = False
     extra: dict[str, Any] = field(default_factory=dict)
+    # scale-out targets: dicts {label, level, side, qty, done, filled, price}; shared with the live trade
+    partials: list[dict[str, Any]] = field(default_factory=list)
 
 
 def evaluate_exit(st: ExitState, spot: float | None, premium: float | None, now: datetime) -> str | None:
@@ -68,6 +70,18 @@ def evaluate_exit(st: ExitState, spot: float | None, premium: float | None, now:
         return "timed_exit"
     if sq is not None and now >= sq:
         return "square_off"
+    return None
+
+
+def evaluate_partial(st: ExitState, spot: float | None) -> int | None:
+    """Index of the first scale-out target (TP1, TP2, ...) that spot has reached and that is not done yet."""
+    if spot is None:
+        return None
+    for i, p in enumerate(st.partials):
+        if p.get("done"):
+            continue
+        if (p["side"] == "above" and spot >= p["level"]) or (p["side"] == "below" and spot <= p["level"]):
+            return i
     return None
 
 
@@ -110,8 +124,18 @@ class ExitManager:
             self._check(st, now)
 
     def _check(self, st: ExitState, now: datetime) -> None:
+        if self.trades is None:
+            return
         reason = evaluate_exit(st, st.last_spot, st.last_premium, now)
-        if reason is None or self.trades is None:
+        if reason is None:
+            # full exits (spot SL, timed exit) win over a target hit on the same tick
+            idx = evaluate_partial(st, st.last_spot)
+            while idx is not None:
+                st.partials[idx]["done"] = True
+                asyncio.get_running_loop().create_task(
+                    self.trades.exit_partial(st.trade_db_id, idx, spot=st.last_spot, premium=st.last_premium),
+                    name=f"partial-{st.trade_ref}-{st.partials[idx]['label']}")
+                idx = evaluate_partial(st, st.last_spot)
             return
         st.triggered = True
         asyncio.get_running_loop().create_task(

@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Compare{% endblock %}
+{% block content %}
+<div class="row" style="margin-bottom:12px"><h1 style="margin:0">Compare strategies</h1><div class="spacer"></div>
+  <span class="muted small">{{ d_from }} → {{ d_to }}</span></div>
+
+<form method="get" class="filters">
+  <div class="field"><label>Period</label>
+    <select name="period">
+      {% for v, l in [('today','Today'),('7d','Last 7 days'),('30d','Last 30 days'),('90d','Last 90 days'),('all','All time'),('custom','Custom')] %}
+      <option value="{{ v }}" {{ 'selected' if period == v }}>{{ l }}</option>{% endfor %}
+    </select></div>
+  <div class="field"><label>From (custom)</label><input type="date" name="day_from" value="{{ d_from }}"></div>
+  <div class="field"><label>To (custom)</label><input type="date" name="day_to" value="{{ d_to }}"></div>
+  <div class="field"><label>Mode</label><select name="mode"><option value="">all</option>
+    <option {{ 'selected' if mode == 'paper' }}>paper</option><option {{ 'selected' if mode == 'live' }}>live</option></select></div>
+  <div class="field"><label>Strategies</label><select name="show">
+    <option value="">active only</option><option value="all" {{ 'selected' if show_all }}>all (incl. disabled)</option></select></div>
+  <button type="submit">Apply</button>
+</form>
+
+<div class="cards">
+  <div class="card"><div class="k">Strategies</div><div class="v">{{ rows|length }}</div></div>
+  <div class="card"><div class="k">Closed trades</div><div class="v">{{ totals.trades }}</div></div>
+  <div class="card"><div class="k">Win %</div><div class="v">{{ ((100 * totals.wins / totals.trades)|round(1)) if totals.trades else '–' }}</div></div>
+  <div class="card"><div class="k">Net P&amp;L (est.)</div><div class="v {{ totals.net|pnlc }}">{{ totals.net|money }}</div></div>
+  <div class="card"><div class="k">Open MTM</div><div class="v {{ totals.unrealized|pnlc }}">{{ totals.unrealized|money if totals.open_qty else '–' }}</div></div>
+</div>
+
+<div class="panel">
+<table class="compare">
+<thead><tr>
+  <th>Strategy</th><th>Type</th><th>Mode</th><th>Status</th><th class="num">Lots</th>
+  <th class="num">Trades</th><th class="num">Wins</th><th class="num">Losses</th><th class="num">Win %</th>
+  <th class="num">Gross</th><th class="num">Charges</th><th class="num">Net</th><th class="num">Avg / trade</th>
+  <th class="num">Avg win</th><th class="num">Avg loss</th><th class="num" title="sum of winning trades ÷ sum of losing trades">Profit factor</th>
+  <th class="num">Best</th><th class="num">Worst</th><th class="num" title="largest fall in cumulative net P&amp;L">Max DD</th>
+  <th class="num" title="how trades closed: spot SL / take-profit / timed exit or square-off">SL / TP / Time</th>
+  <th class="num" title="TP1 + TP2 partial exits filled">TP hits</th><th class="num">Open MTM</th>
+</tr></thead>
+<tbody>
+{% for r in rows %}
+<tr {% if r.id == best_id %}class="best" title="highest net P&amp;L in this period"{% endif %}>
+  <td><a href="/strategies/{{ r.id }}">{{ r.name }}</a>{% if r.id == best_id %} <span class="badge green">best</span>{% endif %}
+    <div class="small muted">{{ r.broker }}</div></td>
+  <td class="small">{{ r.template }}</td>
+  <td><span class="badge {{ r.mode }}">{{ r.mode }}</span></td>
+  <td><span class="badge {{ r.status }}">{{ r.status }}</span>{% if not r.enabled %} <span class="badge grey">disabled</span>{% endif %}</td>
+  <td class="num">{{ r.lots }}</td>
+  <td class="num">{{ r.trades }}</td><td class="num">{{ r.wins }}</td><td class="num">{{ r.losses }}</td>
+  <td class="num">{{ r.win_pct if r.win_pct is not none else '–' }}</td>
+  <td class="num {{ r.gross|pnlc }}">{{ r.gross|money }}</td><td class="num">{{ r.charges|money }}</td>
+  <td class="num {{ r.net|pnlc }}"><b>{{ r.net|money }}</b></td>
+  <td class="num {{ r.avg_net|pnlc }}">{{ r.avg_net|money }}</td>
+  <td class="num pos">{{ r.avg_win|money }}</td><td class="num neg">{{ r.avg_loss|money }}</td>
+  <td class="num">{{ r.profit_factor if r.profit_factor is not none else '–' }}</td>
+  <td class="num {{ r.best|pnlc }}">{{ r.best|money }}</td><td class="num {{ r.worst|pnlc }}">{{ r.worst|money }}</td>
+  <td class="num neg">{{ r.max_dd|money if r.max_dd else '–' }}</td>
+  <td class="num nowrap">{{ r.exits_sl }} / {{ r.exits_tp }} / {{ r.exits_time }}{% if r.exits_other %} <span class="muted small" title="manual, kill switch, other">+{{ r.exits_other }}</span>{% endif %}</td>
+  <td class="num">{{ r.tp_hits if r.template.endswith('TP') or r.tp_hits else '–' }}</td>
+  <td class="num {{ r.unrealized|pnlc }}">{% if r.open_qty %}{{ r.unrealized|money }} <span class="small muted">({{ r.open_qty }})</span>{% else %}–{% endif %}</td>
+</tr>
+{% else %}
+<tr><td colspan="22" class="muted">No {{ 'strategies' if show_all else 'active (enabled) strategies' }}{{ ' in ' ~ mode ~ ' mode' if mode }}.</td></tr>
+{% endfor %}
+</tbody>
+{% if rows|length > 1 %}
+<tfoot><tr><th colspan="5">Total</th><th class="num">{{ totals.trades }}</th><th class="num">{{ totals.wins }}</th><th colspan="2"></th>
+  <th class="num {{ totals.gross|pnlc }}">{{ totals.gross|money }}</th><th class="num">{{ totals.charges|money }}</th>
+  <th class="num {{ totals.net|pnlc }}">{{ totals.net|money }}</th><th colspan="9"></th>
+  <th class="num {{ totals.unrealized|pnlc }}">{{ totals.unrealized|money if totals.open_qty else '–' }}</th></tr></tfoot>
+{% endif %}
+</table>
+<p class="small muted" style="margin-bottom:0">Closed trades only, net after estimated charges; sorted by net P&amp;L. Open MTM is live unrealized P&amp;L of positions open now.
+Shared slots are counted in each strategy that traded them.</p>
+</div>
+{% endblock %}
