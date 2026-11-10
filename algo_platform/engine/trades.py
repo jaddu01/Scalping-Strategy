@@ -573,6 +573,24 @@ class TradeManager:
             finally:
                 lt.partial_busy = False
 
+    async def exit_by_ref(self, trade_ref: str, reason: str, *, instance_id: int | None = None,
+                          partial: str | None = None) -> bool:
+        """Exit asked for by a strategy (e.g. RSI reached its level on candle close): the whole trade, or
+        with `partial` the lots of that scale-out target (TP1 / TP2) at market."""
+        lt = next((x for x in self.live.values()
+                   if x.ref == trade_ref and (instance_id is None or x.instance_id == instance_id)), None)
+        if lt is None:
+            return False
+        spot = self.market.ltp(lt.spot_key) if lt.spot_key else None
+        premium = self.market.ltp(lt.option_series)
+        if partial is None:
+            return await self.exit_trade(lt.id, reason, spot=spot, premium=premium)
+        idx = next((i for i, p in enumerate(lt.partials) if p["label"] == partial and not p.get("done")), None)
+        if idx is None:
+            return False
+        lt.partials[idx]["done"] = True
+        return await self.exit_partial(lt.id, idx, spot=spot, premium=premium)
+
     async def _resize_protective(self, lt: LiveTrade, adapter: Any, sync: BrokerSync, qty: int) -> None:
         """Make the broker-side protective SL cover exactly `qty` units (cancel it at 0)."""
         if not lt.protective_sl_order_id:

@@ -101,8 +101,11 @@ async def run(request: Request, template: str = "nifty_ref_breakout", user: Sess
             async def fetch(start, end):
                 return await acc.adapter.get_historical_candles(spot, 1, start, end)
 
+            # indicator strategies (e.g. EMA / RSI) read a few earlier days to warm up; they are not traded
+            warm = getattr(get_template(template), "warmup_days", 0)
+            fetch_from = d_from - timedelta(days=warm * 2 + 2) if warm else d_from
             candles, days_cached, days_fetched = await cache.get_range(
-                cfg.exchange, cfg.underlying, d_from, d_to, now_ist().date(), fetch,
+                cfg.exchange, cfg.underlying, fetch_from, d_to, now_ist().date(), fetch,
                 lambda d: combine(d, time(9, 15)), lambda d: combine(d, time(15, 30)))
         if not candles:
             raise ValueError("no candles returned for that range")

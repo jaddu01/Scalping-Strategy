@@ -100,6 +100,15 @@ class InstanceRuntime:
     def square_off_time(self) -> time:
         return self.p.settings.market.final_square_off
 
+    async def history(self, instrument: Instrument, timeframe_min: int, count: int) -> list[Candle]:
+        return await self.p.market.history(instrument, timeframe_min, count)
+
+    async def request_exit(self, trade_id: str, reason: str, partial: str | None = None) -> None:
+        # runs in the background: the strategy keeps processing ticks while the exit order fills
+        asyncio.get_running_loop().create_task(
+            self.p.trades.exit_by_ref(trade_id, reason, instance_id=self.instance_id, partial=partial),
+            name=f"strategy-exit-{trade_id}")
+
     def _day_state_key(self, day: date) -> str:
         return f"slots:{self.instance_id}:{day.isoformat()}"
 

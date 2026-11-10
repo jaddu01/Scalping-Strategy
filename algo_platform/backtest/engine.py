@@ -26,6 +26,9 @@ from engine.market_data import series_of
 from strategies.base import EntrySignal, Strategy, TradeInfo
 from strategies.registry import get_template
 
+WARMUP_DAYS = 5  # earlier trading days a backtest day can read through ctx.history()
+
+
 def spot_instrument(underlying: str = "NIFTY", exchange: str = "NSE") -> Instrument:
     return Instrument(exchange=Exchange(exchange), token="SPOT", tradingsymbol=f"{underlying} INDEX",
                       underlying=underlying, instrument_type=InstrumentType.INDEX)
@@ -104,8 +107,10 @@ class SimTrade:
 class BacktestContext:
     """StrategyContext implementation backed by historical candles and a modelled option chain."""
 
-    def __init__(self, cfg: BacktestConfig, minutes: list[Candle], clock: FakeClock) -> None:
+    def __init__(self, cfg: BacktestConfig, minutes: list[Candle], clock: FakeClock,
+                 prior: list[Candle] | None = None) -> None:
         self.cfg = cfg
+        self.prior = prior or []  # earlier days' spot candles, for indicator warm-up
         self.instance_id = None
         self.instance_name = "BACKTEST"
         self.clock = clock
@@ -198,6 +203,45 @@ class BacktestContext:
                          entry_price=prem)
 
     # ---- exits
+    async def history(self, instrument: Instrument, timeframe_min: int, count: int) -> list[Candle]:
+        """Completed candles before now, built from earlier days' and today's 1-minute bars."""
+        now = self.now()
+        bars = [c for c in self.prior if c.start < now] + sorted(
+            (c for c in self.minutes.values() if c.start < now), key=lambda c: c.start)
+        groups: dict[datetime, list[Candle]] = {}
+        for b in bars:
+            groups.setdefault(floor_to_timeframe(b.start, timeframe_min), []).append(b)
+        out = [Candle(start=k, timeframe_min=timeframe_min, open=g[0].open, high=max(x.high for x in g),
+                      low=min(x.low for x in g), close=g[-1].close, source="historical")
+               for k, g in sorted(groups.items()) if k + timedelta(minutes=timeframe_min) <= now]
+        return out[-count:]
+
+    async def request_exit(self, trade_id: str, reason: str, partial: str | None = None) -> None:
+        """Strategy-decided exit, filled at once at the modelled premium (the live engine sends a market order)."""
+        t = self.open
+        if t is None or t.trade_id != trade_id or self.spot_price is None:
+            return
+        prem = self.premium(t.strike, t.expiry, t.direction == "CE_BUY")
+        out = prem * (1 - self.cfg.slippage_pct / 100)
+        if partial is None:
+            await self._close(t, reason, out)
+            return
+        idx = next((i for i, p in enumerate(t.state.partials) if p["label"] == partial and not p.get("done")), None)
+        if idx is None:
+            return
+        self._partial(t, idx, out)
+        if t.open_qty <= 0:
+            await self._close(t, partial, out)
+
+    def _partial(self, t: SimTrade, idx: int, out: float) -> None:
+        p = t.state.partials[idx]
+        p["done"] = True
+        q = min(int(p["qty"]), t.open_qty)
+        t.open_qty -= q
+        t.partial_fills.append({"label": p["label"], "qty": q, "premium": out, "time": self.now()})
+        self.emit("PARTIAL_EXIT", f"{p['label'].upper()} sold qty={q} price={out:.2f} "
+                  f"pnl={(out - t.entry_premium) * q:.2f} remaining={t.open_qty}", trade_id=t.trade_id)
+
     async def check_exit(self) -> None:
         t = self.open
         if t is None or self.spot_price is None:
@@ -212,17 +256,14 @@ class BacktestContext:
             # same scale-out rule as the live exit manager: TP1, TP2 ... sell part of the position
             idx = evaluate_partial(t.state, self.spot_price, prem)
             while idx is not None and t.open_qty > 0:
-                p = t.state.partials[idx]
-                p["done"] = True
-                q = min(int(p["qty"]), t.open_qty)
-                t.open_qty -= q
-                t.partial_fills.append({"label": p["label"], "qty": q, "premium": out, "time": self.now()})
-                self.emit("PARTIAL_EXIT", f"{p['label'].upper()} sold qty={q} price={out:.2f} "
-                          f"pnl={(out - t.entry_premium) * q:.2f} remaining={t.open_qty}", trade_id=t.trade_id)
+                self._partial(t, idx, out)
                 idx = evaluate_partial(t.state, self.spot_price, prem)
             if t.open_qty > 0:
                 return
             reason = t.partial_fills[-1]["label"]
+        await self._close(t, reason, out)
+
+    async def _close(self, t: SimTrade, reason: str, out: float) -> None:
         sold_value = sum(p["qty"] * p["premium"] for p in t.partial_fills) + out * t.open_qty
         t.exit_time, t.exit_spot, t.exit_reason = self.now(), self.spot_price, reason
         t.exit_premium = sold_value / t.qty  # average over all exits, as the live P&L is computed
@@ -265,16 +306,22 @@ async def run_backtest(cfg: BacktestConfig, candles: list[Candle]) -> dict[str, 
     cls = get_template(cfg.template_id)
     settings = cls.settings_model.model_validate(cfg.params)
     by_day: dict[date, list[Candle]] = {}
+    warmup: dict[date, list[Candle]] = {}  # days before the range: indicator warm-up only, never traded
     for c in sorted(candles, key=lambda c: c.start):
         d = to_ist(c.start).date()
         if cfg.day_from <= d <= cfg.day_to:
             by_day.setdefault(d, []).append(c)
+        elif d < cfg.day_from:
+            warmup.setdefault(d, []).append(c)
+    history_days = dict(warmup)
     all_trades: list[SimTrade] = []
     events: list[dict[str, Any]] = []
     tf_list = []
     for day, bars in sorted(by_day.items()):
         clock = FakeClock(combine(day, time(9, 14)))
-        ctx = BacktestContext(cfg, bars, clock)
+        prior = [c for d in sorted(history_days)[-WARMUP_DAYS:] for c in history_days[d]]
+        ctx = BacktestContext(cfg, bars, clock, prior)
+        history_days[day] = bars
         strat = cls(settings, ctx)  # type: ignore[arg-type]
         ctx.strategy = strat
         tf_list = strat.candle_timeframes()

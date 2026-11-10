@@ -269,7 +269,8 @@ async def instance_slots(iid: int, request: Request, user: SessionInfo = Depends
     snap = rt.snapshot() if rt else None
     views: dict[str, dict[str, Any]] = {}
     totals = {"points": 0.0, "pnl": 0.0, "trades": 0}
-    refs = [s["trade_id"] for s in ((snap or {}).get("strategy") or {}).get("slots", []) if s.get("trade_id")]
+    st = (snap or {}).get("strategy") or {}
+    refs = [s["trade_id"] for s in (st.get("slots") or []) + (st.get("signals") or []) if s.get("trade_id")]
     if refs:
         from app.web.slot_view import slot_trade_view
 

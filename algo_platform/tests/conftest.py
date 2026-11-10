@@ -43,6 +43,8 @@ class FakeStrategyContext:
         self.open_position = False
         self.reject_next = False
         self.day_state: dict[date, dict[str, Any]] = {}
+        self.history_candles: list[Candle] = []
+        self.exit_requests: list[tuple[str, str, str | None]] = []
         self.expiries = [DAY, NEXT_TUE]
         self.spot = Instrument(exchange=Exchange.NSE, token="99926000", tradingsymbol="Nifty 50",
                                underlying="NIFTY", instrument_type=InstrumentType.INDEX)
@@ -83,6 +85,12 @@ class FakeStrategyContext:
 
     def square_off_time(self) -> time:
         return time(15, 15)
+
+    async def history(self, instrument: Instrument, timeframe_min: int, count: int) -> list[Candle]:
+        return [c for c in self.history_candles if c.timeframe_min == timeframe_min][-count:]
+
+    async def request_exit(self, trade_id: str, reason: str, partial: str | None = None) -> None:
+        self.exit_requests.append((trade_id, reason, partial))
 
     def load_day_state(self, day: date) -> dict[str, Any]:
         return self.day_state.get(day, {})

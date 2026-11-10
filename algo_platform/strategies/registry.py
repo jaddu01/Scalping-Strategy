@@ -28,8 +28,8 @@ def _load_builtin() -> None:
     global _builtin_loaded
     if not _builtin_loaded:
         _builtin_loaded = True
-        from strategies import (breakout_tp, nifty_early_breakout, nifty_ref_breakout,  # noqa: F401
-                                nifty_two_entry)  # (register themselves)
+        from strategies import (breakout_tp, ema_rsi_breakout, nifty_early_breakout,  # noqa: F401
+                                nifty_ref_breakout, nifty_two_entry)  # (register themselves)
 
 
 def get_template(template_id: str) -> type[Strategy]:

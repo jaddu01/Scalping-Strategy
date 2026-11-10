@@ -19,7 +19,7 @@
 {% if rt and rt.message %}<div class="flash {{ 'err' if rt.status == 'ERROR' else 'ok' }}">{{ rt.message }}</div>{% endif %}
 
 <div class="panel">
-  <h2 style="margin-top:0">Today's slots</h2>
+  <h2 style="margin-top:0">Today's slots / signals</h2>
   <div hx-get="/strategies/{{ inst.id }}/slots" hx-trigger="load, every 3s" hx-swap="innerHTML"><span class="muted">loading…</span></div>
 </div>
 

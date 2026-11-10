@@ -1,0 +1,173 @@
+//@version=6
+// EMA 21 + RSI 50 Breakout / Breakdown - Long & Short (original rules, no filters)
+// Rules:
+//   1. Candle closes across the 21 EMA (above for longs, below for shorts)
+//   2. RSI crosses 50 in the same direction (within N candles of rule 1)
+//      -> the later of the two candles is the CONFIRMATION candle
+//   3. Entry when a following candle breaks the confirmation candle's high (long) / low (short)
+//   Stop : low of the confirmation candle (long) / high of the confirmation candle (short)
+//          (switchable to swing low / swing high in Inputs)
+//   Exit : RSI reaches 70 (long) / 30 (short), or optional early exit
+// For education/backtesting only - not financial advice.
+
+strategy("EMA21 + RSI50 Breakout (Candle SL)", shorttitle="EMA-RSI BO C", overlay=false,
+      initial_capital=100000, default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+      commission_type=strategy.commission.percent, commission_value=0.03,
+      process_orders_on_close=true, pyramiding=0, max_labels_count=500)
+
+// --------- Inputs ---------
+grpI = "Indicators"
+emaLen = input.int(21, "EMA length", minval=1, group=grpI)
+rsiLen = input.int(14, "RSI length", minval=1, group=grpI)
+rsiMid = input.float(50, "RSI middle level", group=grpI)
+rsiOB  = input.float(70, "RSI upper level (long exit)", group=grpI)
+rsiOS  = input.float(30, "RSI lower level (short exit)", group=grpI)
+
+grpR = "Rules"
+syncBars  = input.int(3, "Max candles between EMA cross and RSI cross", minval=1, group=grpR)
+validBars = input.int(2, "Candles allowed for the breakout", minval=1, group=grpR)
+slMode    = input.string("Confirmation candle", "Stop loss type", options=["Confirmation candle", "Swing high/low"], group=grpR)
+swingLen  = input.int(10, "Swing high/low lookback (only for Swing type)", minval=2, group=grpR)
+maxRngAtr = input.float(0, "Skip if confirmation candle range > x ATR (0 = off)", minval=0, step=0.25, group=grpR)
+offTicks  = input.int(1, "Entry/stop buffer (ticks)", minval=0, group=grpR)
+earlyExit = input.bool(true, "Early exit: candle closes back through the 21 EMA", group=grpR)
+rsiEarly  = input.bool(false, "Also early exit if RSI goes back through 50", group=grpR)
+
+grpF = "Trades"
+allowLong  = input.bool(true, "Take long (buy) trades", group=grpF)
+allowShort = input.bool(true, "Take short (sell) trades", group=grpF)
+
+grpD = "Display"
+showLabels = input.bool(true, "Show BUY / SELL / EXIT labels", group=grpD)
+showSetups = input.bool(true, "Show setup triangles (confirmation candle)", group=grpD)
+
+// --------- Calculations ---------
+ema21 = ta.ema(close, emaLen)
+rsi   = ta.rsi(close, rsiLen)
+buf   = offTicks * syminfo.mintick
+
+pxUp  = ta.crossover(close, ema21)
+pxDn  = ta.crossunder(close, ema21)
+rsiUp = ta.crossover(rsi, rsiMid)
+rsiDn = ta.crossunder(rsi, rsiMid)
+
+bsPxUp  = ta.barssince(pxUp)
+bsRsiUp = ta.barssince(rsiUp)
+bsPxDn  = ta.barssince(pxDn)
+bsRsiDn = ta.barssince(rsiDn)
+
+swingLo = ta.lowest(low, swingLen)
+swingHi = ta.highest(high, swingLen)
+atrVal  = ta.atr(14)
+rangeOk = maxRngAtr == 0 or (high - low) <= atrVal * maxRngAtr
+
+longConf  = allowLong  and (pxUp or rsiUp) and bsPxUp < syncBars and bsRsiUp < syncBars and close > ema21 and rsi > rsiMid and rangeOk
+shortConf = allowShort and (pxDn or rsiDn) and bsPxDn < syncBars and bsRsiDn < syncBars and close < ema21 and rsi < rsiMid and rangeOk
+
+flat       = strategy.position_size == 0
+longArmed  = longConf and flat
+shortArmed = shortConf and flat
+
+// --------- State ---------
+var bool  longPending  = false
+var float longLevel    = na
+var float longStop     = na
+var int   longBar      = na
+var bool  shortPending = false
+var float shortLevel   = na
+var float shortStop    = na
+var int   shortBar     = na
+
+if longArmed
+    longPending  := true
+    longLevel    := high + buf
+    longStop     := (slMode == "Confirmation candle" ? low : swingLo) - buf
+    longBar      := bar_index
+    shortPending := false
+    strategy.cancel("Short")
+
+if shortArmed
+    shortPending := true
+    shortLevel   := low - buf
+    shortStop    := (slMode == "Confirmation candle" ? high : swingHi) + buf
+    shortBar     := bar_index
+    longPending  := false
+    strategy.cancel("Long")
+
+if longPending and strategy.position_size > 0
+    longPending := false
+if shortPending and strategy.position_size < 0
+    shortPending := false
+
+if longPending and bar_index > longBar and (bar_index - longBar >= validBars or close < ema21)
+    longPending := false
+    strategy.cancel("Long")
+if shortPending and bar_index > shortBar and (bar_index - shortBar >= validBars or close > ema21)
+    shortPending := false
+    strategy.cancel("Short")
+
+// --------- Orders ---------
+if longPending
+    strategy.entry("Long", strategy.long, stop=longLevel, comment="Buy breakout")
+if shortPending
+    strategy.entry("Short", strategy.short, stop=shortLevel, comment="Sell breakdown")
+
+if longPending or strategy.position_size > 0
+    strategy.exit("Long SL", from_entry="Long", stop=longStop, comment_loss="SL")
+if shortPending or strategy.position_size < 0
+    strategy.exit("Short SL", from_entry="Short", stop=shortStop, comment_loss="SL")
+
+string exitText = na
+if strategy.position_size > 0
+    if rsi >= rsiOB
+        strategy.close("Long", comment="RSI " + str.tostring(rsiOB))
+        exitText := "EXIT\nRSI " + str.tostring(rsiOB)
+    else if (earlyExit and close < ema21) or (rsiEarly and rsi < rsiMid)
+        strategy.close("Long", comment="Early exit")
+        exitText := "EXIT\nearly"
+
+if strategy.position_size < 0
+    if rsi <= rsiOS
+        strategy.close("Short", comment="RSI " + str.tostring(rsiOS))
+        exitText := "EXIT\nRSI " + str.tostring(rsiOS)
+    else if (earlyExit and close > ema21) or (rsiEarly and rsi > rsiMid)
+        strategy.close("Short", comment="Early exit")
+        exitText := "EXIT\nearly"
+
+// --------- Labels on the price chart ---------
+longEntered  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+shortEntered = strategy.position_size < 0 and strategy.position_size[1] >= 0
+slHit        = strategy.position_size[1] != 0 and strategy.position_size == 0 and na(exitText[1])
+
+if showLabels and longEntered
+    label.new(bar_index, low, "BUY\n" + str.tostring(strategy.position_avg_price, format.mintick) + "\nSL " + str.tostring(longStop, format.mintick),
+          style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small, force_overlay=true)
+if showLabels and shortEntered
+    label.new(bar_index, high, "SELL\n" + str.tostring(strategy.position_avg_price, format.mintick) + "\nSL " + str.tostring(shortStop, format.mintick),
+          style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small, force_overlay=true)
+if showLabels and not na(exitText)
+    label.new(bar_index, high, exitText, style=label.style_label_down, color=color.blue, textcolor=color.white, size=size.tiny, force_overlay=true)
+if showLabels and slHit
+    label.new(bar_index, high, "SL hit", style=label.style_label_down, color=color.gray, textcolor=color.white, size=size.tiny, force_overlay=true)
+
+// --------- Plots: RSI pane ---------
+plot(rsi, "RSI", color=color.purple, linewidth=2)
+hline(rsiOB,  "Upper",  color=color.gray,   linestyle=hline.style_dotted)
+hline(rsiMid, "Middle", color=color.yellow, linestyle=hline.style_dotted)
+hline(rsiOS,  "Lower",  color=color.gray,   linestyle=hline.style_dotted)
+
+// --------- Plots: price chart ---------
+plot(ema21, "EMA 21", color=color.orange, linewidth=2, force_overlay=true)
+
+plotshape(showSetups and longArmed,  title="Long setup",  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.small, force_overlay=true)
+plotshape(showSetups and shortArmed, title="Short setup", style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.small, force_overlay=true)
+
+plot(longPending  ? longLevel  : na, "Long trigger",  color=color.green, style=plot.style_linebr, linewidth=1, force_overlay=true)
+plot(shortPending ? shortLevel : na, "Short trigger", color=color.red,   style=plot.style_linebr, linewidth=1, force_overlay=true)
+plot(strategy.position_size > 0 ? longStop : strategy.position_size < 0 ? shortStop : na, "Stop loss", color=color.red, style=plot.style_linebr, linewidth=2, force_overlay=true)
+
+// --------- Alerts ---------
+if longArmed
+    alert("EMA-RSI LONG setup on " + syminfo.ticker + ": buy above " + str.tostring(longLevel, format.mintick) + ", SL " + str.tostring(longStop, format.mintick), alert.freq_once_per_bar_close)
+if shortArmed
+    alert("EMA-RSI SHORT setup on " + syminfo.ticker + ": sell below " + str.tostring(shortLevel, format.mintick) + ", SL " + str.tostring(shortStop, format.mintick), alert.freq_once_per_bar_close)

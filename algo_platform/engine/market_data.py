@@ -292,6 +292,22 @@ class MarketDataService:
             except Exception:
                 log.exception("candle listener failed")
 
+    async def history(self, inst: Instrument, timeframe_min: int, count: int) -> list[Candle]:
+        """Last `count` completed candles from the feed account's historical API (oldest first)."""
+        if self.feed is None or count <= 0:
+            return []
+        now = self.clock.now()
+        trading_days = -(-count * timeframe_min // 375) + 1
+        start = now - timedelta(days=trading_days * 2 + 4)  # room for weekends and holidays
+        try:
+            feed_inst = self.feed.resolve_symbol(key_of(inst))
+            rows = await self.feed.get_historical_candles(feed_inst, timeframe_min, start, now)
+        except Exception as exc:
+            self._emit("HISTORICAL_FETCH_FAILED", f"history {inst.tradingsymbol} {timeframe_min}m: {exc}", Level.WARNING)
+            return []
+        done = sorted((c for c in rows if c.start + timedelta(minutes=timeframe_min) <= now), key=lambda c: c.start)
+        return done[-count:]
+
     async def get_candle(self, inst: Instrument, start: datetime, timeframe_min: int) -> Candle | None:
         """Reference candle: built from ticks, cross-checked with the broker's historical API.
         The broker's candle wins on mismatch (broker is the source of truth)."""

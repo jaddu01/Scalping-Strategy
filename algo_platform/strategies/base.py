@@ -130,6 +130,15 @@ class StrategyContext(Protocol):
 
     def save_day_state(self, day: date, state: dict[str, Any]) -> None: ...
 
+    async def history(self, instrument: Instrument, timeframe_min: int, count: int) -> list[Candle]:
+        """The last `count` completed candles of `instrument` (oldest first), e.g. to warm up indicators."""
+        ...
+
+    async def request_exit(self, trade_id: str, reason: str, partial: str | None = None) -> None:
+        """Ask the engine to close the trade (or, with `partial`, sell that scale-out target's lots, e.g.
+        "tp1"). Used for exits decided by the strategy itself, such as an RSI level on candle close."""
+        ...
+
 
 class Strategy(abc.ABC):
     template_id: ClassVar[str]
