@@ -210,6 +210,10 @@ class Strategy(abc.ABC):
     def apply_settings(self, new: StrategySettings) -> None:
         self.settings = new
 
+    def indicator_snapshot(self, price: float | None = None) -> dict[str, float] | None:
+        """Indicator values at `price` (e.g. RSI / EMA) for trade reports; None if the strategy has none."""
+        return None
+
     # ---- UI
     def status(self) -> dict[str, Any]:
         """Free-form state for the UI (e.g. today's slots)."""

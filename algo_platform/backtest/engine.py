@@ -94,7 +94,10 @@ class SimTrade:
                 "exit_spot": round(self.exit_spot, 2) if self.exit_spot is not None else None,
                 "exit_premium": round(self.exit_premium, 2) if self.exit_premium is not None else None,
                 "exit_reason": self.exit_reason, "spot_points": round(self._points(), 2),
-                "partials": ", ".join(f"{p['label']}:{p['qty']}@{p['premium']:.2f}" for p in self.partial_fills),
+                "partials": ", ".join(f"{p['label']}:{p['qty']}@{p['premium']:.2f}"
+                                      + (f" (RSI {p['rsi']:.1f})" if p.get("rsi") is not None else "")
+                                      for p in self.partial_fills),
+                "rsi_in": self.meta.get("rsi_in"), "rsi_out": self.meta.get("rsi_out"),
                 "gross": self.gross, "charges": self.charges, "net": self.net}
 
     def _points(self) -> float:
@@ -194,6 +197,9 @@ class BacktestContext:
                          lots=signal.lots, qty=qty, signal_time=self.now(), entry_spot=signal.spot,
                          trigger=signal.trigger, entry_premium=prem, spot_sl=plan.spot_sl, exit_at=st.exit_at, state=st,
                          meta=dict(signal.meta), open_qty=qty)
+        snap = self._indicators()
+        if snap and "rsi" in snap:
+            trade.meta["rsi_in"] = snap["rsi"]
         trade.meta["protective_floor"] = (prem * (1 - plan.protective_sl_pct / 100)) if plan.protective_sl_pct else None
         self.open = trade
         self.trades.append(trade)
@@ -246,7 +252,9 @@ class BacktestContext:
         p["done"] = True
         q = min(int(p["qty"]), t.open_qty)
         t.open_qty -= q
-        t.partial_fills.append({"label": p["label"], "qty": q, "premium": out, "time": self.now()})
+        snap = self._indicators()
+        t.partial_fills.append({"label": p["label"], "qty": q, "premium": out, "time": self.now(),
+                                "rsi": snap.get("rsi") if snap else None})
         self.emit("PARTIAL_EXIT", f"{p['label'].upper()} sold qty={q} price={out:.2f} "
                   f"pnl={(out - t.entry_premium) * q:.2f} remaining={t.open_qty}", trade_id=t.trade_id)
 
@@ -271,7 +279,16 @@ class BacktestContext:
             reason = t.partial_fills[-1]["label"]
         await self._close(t, reason, out)
 
+    def _indicators(self) -> dict[str, float] | None:
+        try:
+            return self.strategy.indicator_snapshot(self.spot_price) if self.strategy is not None else None
+        except Exception:
+            return None
+
     async def _close(self, t: SimTrade, reason: str, out: float) -> None:
+        snap = self._indicators()
+        if snap and "rsi" in snap:
+            t.meta["rsi_out"] = snap["rsi"]
         sold_value = sum(p["qty"] * p["premium"] for p in t.partial_fills) + out * t.open_qty
         t.exit_time, t.exit_spot, t.exit_reason = self.now(), self.spot_price, reason
         t.exit_premium = sold_value / t.qty  # average over all exits, as the live P&L is computed

@@ -337,6 +337,28 @@ async def test_backtest_warms_up_on_earlier_days_and_scales_out():
     assert tr["day"] == "2026-11-04" and tr["direction"] == "CE_BUY" and tr["qty"] == 650
     assert tr["partials"].startswith("tp1:260@") and ", tp2:260@" in tr["partials"]
     assert tr["exit_reason"] == "timed_exit" and tr["exit_time"] == "15:15:00"  # last 2 lots: hard exit
+    # RSI recorded for the trades table: at entry, at each TP sell, at the final exit
+    assert 50 < tr["rsi_in"] < 68 and tr["rsi_out"] > 80
+    assert "tp1:260@" in tr["partials"] and tr["partials"].count("(RSI ") == 2
+
+
+def test_backtest_trades_table_shows_rsi_only_when_recorded():
+    from app.web.render import templates
+
+    base = {"trade_id": "B1", "day": "2026-11-09", "slot": 1, "ref_start": "09:30", "direction": "CE_BUY",
+            "strike": 24950, "signal_time": "10:00:01", "entry_spot": 24950.0, "spot_sl": 24920.0,
+            "entry_premium": 100.0, "exit_time": "10:30:00", "exit_spot": 24990.0, "exit_premium": 130.0,
+            "exit_reason": "trailing_stop", "partials": "", "spot_points": 40.0, "gross": 19500.0, "net": 19300.0}
+    res = {"summary": {}, "exit_reasons": {}, "assumptions": {}, "events": [], "equity": [], "daily": []}
+    src = open("app/web/templates/backtest_result.html").read()
+    block = templates.env.from_string(src[src.index("{% set show_rsi"):src.index("<details")])  # the trades table
+
+    def render(trades):
+        return block.render(res={**res, "trades": trades})
+    html = render([{**base, "rsi_in": 55.43, "rsi_out": 71.08}])
+    assert "RSI in" in html and "55.4" in html and "71.1" in html
+    old = render([{**base}])  # a run saved before RSI was recorded, or a slot strategy
+    assert "RSI in" not in old
 
 
 def test_signals_table_renders():

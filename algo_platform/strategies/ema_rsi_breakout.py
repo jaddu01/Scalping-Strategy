@@ -564,6 +564,14 @@ class EmaRsiBreakout(Strategy):
         else:
             self.ind.s = new
 
+    def indicator_snapshot(self, price: float | None = None) -> dict[str, float] | None:
+        """Live RSI (the forming candle closing at `price`, as the TP checks use) and the last EMA."""
+        if not self.ind.ready():
+            return None
+        rsi = self.ind.rsi.peek(price) if price is not None else None
+        rsi = self.ind.values["rsi"] if rsi is None else rsi
+        return {"rsi": round(rsi, 2), "ema": round(self.ind.values["ema"], 2)}  # type: ignore[arg-type]
+
     def phase(self) -> str:
         a = self.active
         if a is None:
