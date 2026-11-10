@@ -62,6 +62,16 @@ class RSI:
         self.value = 100.0 if down == 0 else 0.0 if up == 0 else 100.0 - 100.0 / (1.0 + up / down)
         return self.value
 
+    def peek(self, close: float) -> float | None:
+        """RSI if the forming candle closed at `close` now (TradingView's real-time value); state unchanged."""
+        if self.prev is None or self.up.value is None or self.down.value is None:
+            return None
+        change = close - self.prev
+        n = self.up.length
+        up = (max(change, 0.0) + (n - 1) * self.up.value) / n
+        down = (max(-change, 0.0) + (n - 1) * self.down.value) / n
+        return 100.0 if down == 0 else 0.0 if up == 0 else 100.0 - 100.0 / (1.0 + up / down)
+
 
 class ATR:
     """ta.atr(length): RMA of the true range (first candle: high − low)."""

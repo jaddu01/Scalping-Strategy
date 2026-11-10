@@ -46,6 +46,18 @@ def test_rsi_matches_wilder_reference():
     assert [up.update(x) for x in (1, 2, 3, 4)][-1] == 100.0  # only gains
 
 
+def test_rsi_peek_is_the_live_value_without_changing_state():
+    closes = [44.34, 44.09, 44.15, 43.61, 44.33, 44.83, 45.10, 45.42, 45.84, 46.08, 45.89, 46.03, 45.61, 46.28,
+              46.28, 46.00]
+    r = RSI(14)
+    for c in closes:
+        r.update(c)
+    before = (r.prev, r.up.value, r.down.value, r.value)
+    live = r.peek(46.40)
+    assert (r.prev, r.up.value, r.down.value, r.value) == before  # nothing committed
+    assert live == pytest.approx(r.update(46.40))  # = the value if the candle closed there
+
+
 def test_atr_first_bar_is_high_minus_low():
     a = ATR(2)
     assert a.update(10, 8, 9) is None
@@ -350,3 +362,66 @@ async def test_incomplete_candle_is_replaced_by_the_brokers():
     ctx.clock.set(t + timedelta(minutes=5, seconds=2))
     await strat.on_candle(ctx.spot, partial)
     assert strat.ind.last.close == full.close
+
+
+async def _in_trade(**kw):
+    ctx = warm_ctx(-2)
+    strat = await start(ctx, **kw)
+    t, px = await rally_until_setup(strat, ctx)
+    ctx.clock.set(t + timedelta(seconds=40))
+    await strat.on_tick(tick(strat.setups[0].trigger))
+    assert strat.setups[0].state == "IN_TRADE"
+    return ctx, strat, t, px
+
+
+def _price_for_rsi(strat, level: float, up: bool = True) -> float:
+    """Smallest move from the last close whose live RSI reaches `level`."""
+    last = strat.ind.last.close
+    for k in range(1, 20000):
+        p = last + k * 0.05 if up else last - k * 0.05
+        r = strat.ind.rsi.peek(p)
+        if (r >= level) if up else (r <= level):
+            return round(p, 2)
+    raise AssertionError("level not reachable")
+
+
+async def test_tp1_tp2_fire_mid_candle_on_live_rsi():
+    ctx, strat, t, px = await _in_trade()
+    rsi_at_close = strat.ind.values["rsi"]
+    assert rsi_at_close < 68
+    p68 = _price_for_rsi(strat, 68)
+    ctx.clock.set(t + timedelta(minutes=2))  # middle of the forming candle
+    await strat.on_tick(tick(p68 - 0.05))
+    assert ctx.exit_requests == []  # live RSI just below 68
+    await strat.on_tick(tick(p68))
+    assert ctx.exit_requests == [("T1", "tp1", "tp1")]
+    await strat.on_tick(tick(p68 + 1))
+    assert len(ctx.exit_requests) == 1  # each target once
+    p80 = _price_for_rsi(strat, 80)
+    await strat.on_tick(tick(p80))
+    assert ctx.exit_requests == [("T1", "tp1", "tp1"), ("T1", "tp2", "tp2")]
+    assert any("(live)" in m for m in ctx.messages("TP_SIGNAL"))
+
+
+async def test_candle_close_mode_waits_for_the_close():
+    ctx, strat, t, px = await _in_trade(rsi_exit_on="candle_close")
+    p68 = _price_for_rsi(strat, 68)
+    ctx.clock.set(t + timedelta(minutes=2))
+    await strat.on_tick(tick(p68 + 2))
+    assert ctx.exit_requests == []
+    await candle(strat, ctx, t, px, p68 + 2)  # the candle closes up there
+    assert ctx.exit_requests == [("T1", "tp1", "tp1")]
+
+
+async def test_pe_mid_candle_tp_at_live_rsi_32():
+    ctx = warm_ctx(+2)
+    strat = await start(ctx)
+    t, px = await rally_until_setup(strat, ctx, step=-6.0)
+    ctx.clock.set(t + timedelta(seconds=40))
+    await strat.on_tick(tick(strat.setups[0].trigger))
+    p32 = _price_for_rsi(strat, 32, up=False)
+    ctx.clock.set(t + timedelta(minutes=2))
+    await strat.on_tick(tick(p32 + 0.05))
+    assert ctx.exit_requests == []
+    await strat.on_tick(tick(p32))
+    assert ctx.exit_requests == [("T1", "tp1", "tp1")]

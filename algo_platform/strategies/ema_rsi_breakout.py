@@ -8,8 +8,11 @@ Pine logic on 5-minute NIFTY spot candles:
   setup void     no breakout in time, or a candle closes back below EMA 21
   stop           confirmation candle low - buffer (or the swing low), checked on every spot tick
 Exits on this platform (TP1 / TP2 replace the script's single RSI 70 exit):
-  TP1            sell 40 % of the lots when a candle closes with RSI >= 68   (PE: RSI <= 32)
-  TP2            sell 40 % more when RSI >= 80                                (PE: RSI <= 20)
+  TP1            sell 40 % of the lots as soon as the live RSI reaches 68     (PE: RSI <= 32)
+  TP2            sell 40 % more when the live RSI reaches 80                  (PE: RSI <= 20)
+                 live RSI = RSI with the current tick as the forming candle's close (TradingView's real-time
+                 value), so a target fires mid-candle; set "RSI targets checked on" to candle_close for the
+                 Pine behaviour
   rest           spot SL, the script's early exit (a candle closes back through EMA 21), or the 15:15 hard exit
 New entries only between 09:20 and 15:00; one position at a time; risk checks as usual.
 """
@@ -66,7 +69,7 @@ class EmaRsiBreakoutSettings(StrategySettings):
     tp_enabled: bool = Field(True, title="Use TP1 / TP2",
                              description="Off: the whole position exits at the RSI exit level (the script's rule)")
     tp1_rsi: float = Field(68, gt=0, lt=100, title="TP1: RSI level (long)",
-                           description="Sell TP1 lots when a candle closes with RSI at or above this; "
+                           description="Sell TP1 lots when RSI reaches this (live, mid-candle by default); "
                                        "short trades use 100 − this (68 -> 32)")
     tp1_lots: int = Field(0, ge=0, le=200, title="TP1 lots", description="0 = automatic (40 % of Lots: 10 -> 4)")
     tp2_rsi: float = Field(80, gt=0, lt=100, title="TP2: RSI level (long)",
@@ -74,6 +77,10 @@ class EmaRsiBreakoutSettings(StrategySettings):
     tp2_lots: int = Field(0, ge=0, le=200, title="TP2 lots", description="0 = automatic (40 % of Lots: 10 -> 4)")
     rsi_exit: float = Field(70, gt=0, lt=100, title="RSI exit level when TP is off (long)",
                             description="Short trades use 100 − this (70 -> 30)")
+    rsi_exit_on: Literal["tick", "candle_close"] = Field(
+        "tick", title="RSI targets checked on",
+        description="tick: TP1 / TP2 (or the RSI exit) fire mid-candle as soon as the live RSI reaches the level · "
+                    "candle_close: only when a candle closes there (the Pine script's behaviour)")
     strike_step: int = Field(50, ge=1, le=1000, title="Strike step")
     expiry: Literal["nearest_weekly", "next_weekly"] = Field("nearest_weekly", title="Expiry")
     entry_order_type: Literal["MARKET", "LIMIT"] = Field("MARKET", title="Entry order type")
@@ -216,8 +223,8 @@ class EmaRsiBreakout(Strategy):
     display_name: ClassVar[str] = "NIFTY EMA21 + RSI50 Breakout + TP1/TP2 (Pine)"
     description: ClassVar[str] = ("From ema21_rsi50_candle_sl.pine: close across EMA 21 + RSI crossing 50 confirms a "
                                   "candle; buy ATM CE / PE on the break of its high / low within 2 candles; SL at "
-                                  "the candle's other end; TP1 at RSI 68 (PE 32), TP2 at RSI 80 (PE 20), rest at "
-                                  "the EMA early exit or the 15:15 hard exit.")
+                                  "the candle's other end; TP1 when live RSI hits 68 (PE 32), TP2 at 80 (PE 20), "
+                                  "rest at the EMA early exit or the 15:15 hard exit.")
     version: ClassVar[str] = "1.0"
     settings_model: ClassVar[type[StrategySettings]] = EmaRsiBreakoutSettings
     warmup_days: ClassVar[int] = 5  # backtests load this many earlier trading days for EMA / RSI warm-up
@@ -392,7 +399,8 @@ class EmaRsiBreakout(Strategy):
                             f"trigger={trig:.2f} SL={stop:.2f} EMA={ema:.2f} RSI={rsi:.2f} until={fmt_hm(x.valid_until)}",
                    setup=x.no, direction=d, trigger=trig, stop=stop, ema=ema, rsi=rsi)
 
-    async def _candle_exits(self, a: Setup, c: Candle, ema: float, rsi: float) -> None:
+    async def _rsi_exits(self, a: Setup, rsi: float, where: str) -> bool:
+        """TP1 / TP2 (or the single RSI exit when TP is off). True if something was sold."""
         s = self.settings
         is_long = a.direction == "CE_BUY"
 
@@ -405,14 +413,22 @@ class EmaRsiBreakout(Strategy):
                 if label not in a.tp_done and reached(level) and self._target_lots(label):
                     a.tp_done.append(label)
                     fired = True
-                    self._emit("TP_SIGNAL", f"{label.upper()} RSI={rsi:.2f} setup #{a.no}", setup=a.no, rsi=rsi)
+                    self._emit("TP_SIGNAL", f"{label.upper()} RSI={rsi:.2f} ({where}) setup #{a.no}", setup=a.no,
+                               rsi=rsi, where=where)
                     await self.ctx.request_exit(a.trade_id, label, partial=label)  # type: ignore[arg-type]
-            if fired:
-                return  # a target sold on this candle; the rest is judged on the next candles
-        elif reached(s.rsi_exit):
+            return fired
+        if reached(s.rsi_exit):
             a.exit_requested = True
+            self._emit("RSI_EXIT_SIGNAL", f"RSI={rsi:.2f} ({where}) setup #{a.no}", setup=a.no, rsi=rsi, where=where)
             await self.ctx.request_exit(a.trade_id, f"rsi_{s.rsi_exit:g}")  # type: ignore[arg-type]
-            return
+            return True
+        return False
+
+    async def _candle_exits(self, a: Setup, c: Candle, ema: float, rsi: float) -> None:
+        s = self.settings
+        is_long = a.direction == "CE_BUY"
+        if await self._rsi_exits(a, rsi, "candle close"):
+            return  # a target sold on this candle; the rest is judged on the next candles
         back_ema = s.early_exit_ema and (c.close < ema if is_long else c.close > ema)
         back_rsi = s.early_exit_rsi and (rsi < s.rsi_mid if is_long else rsi > s.rsi_mid)
         if back_ema or back_rsi:
@@ -431,10 +447,19 @@ class EmaRsiBreakout(Strategy):
         if self.spot is None or tick.token != self.spot.token:
             return
         a = self.active
-        if a is None or a.state != "PENDING":
+        if a is None:
+            return
+        s = self.settings
+        if a.state == "IN_TRADE":
+            # mid-candle TP: the live RSI with this tick as the forming candle's close
+            if s.rsi_exit_on == "tick" and a.trade_id and not a.exit_requested:
+                rsi = self.ind.rsi.peek(tick.ltp)
+                if rsi is not None and await self._rsi_exits(a, rsi, "live"):
+                    self._persist()
+            return
+        if a.state != "PENDING":
             return
         now = self.ctx.now()
-        s = self.settings
         if now >= a.valid_until or not (combine(now.date(), s.entry_start) <= now < combine(now.date(), s.entry_end)):
             return
         hit = tick.ltp >= a.trigger if a.direction == "CE_BUY" else tick.ltp <= a.trigger
