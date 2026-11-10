@@ -6,8 +6,8 @@ Works for NSE indices (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY — options on NFO
 At fixed times a specific index spot candle becomes the reference candle. After it closes:
   spot > ref_high + buffer  ->  BUY ATM CE   (spot SL: exit if spot <= ref_low)
   spot < ref_low  - buffer  ->  BUY ATM PE   (spot SL: exit if spot >= ref_high)
-Entry is allowed from the reference close until the hard exit (reference START + exit_offset_min),
-limited further by entry_window_candles. First breakout only, max one trade per slot, no
+Entry is allowed from the reference close until the hard exit (reference START + exit_offset_min, or
+the slot's own exit time in schedules that set one), limited further by the entry window. First breakout only, max one trade per slot, no
 re-entry, one open position per instance. Every trade is force-closed at the slot's exit time.
 """
 from __future__ import annotations
@@ -48,28 +48,22 @@ CANDLE_CLOSE_GRACE = timedelta(seconds=15)
 RETIRED_KEYS = {"trailing_stop", "trail_timeframe_min", "skip_if_other_strategy_holds"}
 
 
-class NiftyRefBreakoutSettings(StrategySettings):
+class BreakoutBaseSettings(StrategySettings):
+    """Settings and checks shared by every reference-candle breakout template. A subclass adds its
+    schedule and implements `slot_times()`."""
+
     underlying: str = Field("NIFTY", title="Underlying index",
                             description="Index name as in the broker's instrument list: NIFTY, BANKNIFTY, FINNIFTY, "
                                         "MIDCPNIFTY (NSE) or SENSEX, BANKEX (BSE)")
     exchange: Literal["NSE", "BSE"] = Field(
         "NSE", title="Index exchange",
         description="NSE: index on NSE, options on NFO · BSE: index on BSE, options on BFO (SENSEX, BANKEX)")
-    reference_candle_starts: list[time] = Field(
-        default_factory=lambda: [time.fromisoformat(t) for t in DEFAULT_REF_STARTS],
-        title="Reference candle start times (IST)",
-        description="Fixed schedule of reference candles, comma separated HH:MM",
-    )
     candle_timeframe_min: int = Field(5, ge=1, le=60, title="Candle timeframe (minutes)",
                                       description="Length of the reference candle")
     buffer_points: float = Field(2.25, ge=0, le=500, title="Buffer (points)",
                                  description="Added to ref high / subtracted from ref low to get the triggers")
-    entry_window_candles: int = Field(2, ge=1, le=24, title="Entry window (candles)",
-                                      description="Entries allowed from reference close for this many candles")
-    exit_offset_min: int = Field(15, ge=1, le=375, title="Hard exit offset (minutes)",
-                                 description="Hard exit = reference START + this many minutes")
     exit_early_sec: int = Field(2, ge=0, le=60, title="Exit early by (seconds)",
-                                description="Timed exit this many seconds before reference start + offset, e.g. "
+                                description="Timed exit this many seconds before the slot's exit time, e.g. "
                                             "09:30 slot -> 09:44:58. The entry window closes at the same moment")
     lots: int = Field(5, ge=1, le=200, title="Lots",
                       description="Lots per trade; lot size is read from the broker instrument master")
@@ -109,6 +103,57 @@ class NiftyRefBreakoutSettings(StrategySettings):
             raise ValueError("underlying is required")
         return v
 
+    @model_validator(mode="after")
+    def _common_checks(self) -> "BreakoutBaseSettings":
+        if self.underlying in BSE_INDICES and self.exchange != "BSE":
+            raise ValueError(f"{self.underlying} trades on BSE: set Index exchange to BSE")
+        if self.exchange == "BSE" and self.underlying not in BSE_INDICES:
+            raise ValueError(f"{self.underlying} is not a BSE index: set Index exchange to NSE")
+        if self.take_profit_mode is not TakeProfitMode.NONE and self.take_profit_value <= 0:
+            raise ValueError("take_profit_value must be > 0 when a take-profit mode is selected")
+        return self
+
+    def slot_times(self) -> list[tuple[time, timedelta, timedelta]]:
+        """Each slot as (reference start, entry-window end, hard exit); the last two are offsets from the
+        reference start, before `exit_early_sec` is applied."""
+        raise NotImplementedError
+
+
+def check_slot_basics(start: time, tf: int) -> None:
+    """Checks every schedule shares: whole minute, inside market hours, on the candle grid."""
+    if start.second or start.microsecond:
+        raise ValueError(f"{start} must be a whole minute")
+    if start < MARKET_OPEN or start >= MARKET_CLOSE:
+        raise ValueError(f"{fmt_hm(start)} is outside market hours 09:15-15:30")
+    if (start.hour * 60 + start.minute) % tf:
+        raise ValueError(f"reference start {fmt_hm(start)} is not aligned to the {tf}-minute timeframe")
+
+
+def check_slot_exit(start: time, exit_off: timedelta, early_sec: int, tf: int) -> None:
+    exit_dt = datetime.combine(date.today(), start) + exit_off - timedelta(seconds=early_sec)
+    if exit_dt.time() > MARKET_CLOSE or exit_dt.date() != date.today():
+        raise ValueError(f"slot {fmt_hm(start)}: exit at {exit_dt:%H:%M} is after market close")
+    if exit_off - timedelta(seconds=early_sec) <= timedelta(minutes=tf):
+        raise ValueError(f"slot {fmt_hm(start)}: the exit must come after the reference candle closes")
+
+
+class NiftyRefBreakoutSettings(BreakoutBaseSettings):
+    """Fixed list of reference start times; every slot exits at start + exit_offset_min."""
+
+    FORM_FIRST: ClassVar[tuple[str, ...]] = ("underlying", "exchange", "reference_candle_starts",
+                                             "candle_timeframe_min", "buffer_points", "entry_window_candles",
+                                             "exit_offset_min", "exit_early_sec", "lots")
+
+    reference_candle_starts: list[time] = Field(
+        default_factory=lambda: [time.fromisoformat(t) for t in DEFAULT_REF_STARTS],
+        title="Reference candle start times (IST)",
+        description="Fixed schedule of reference candles, comma separated HH:MM",
+    )
+    entry_window_candles: int = Field(2, ge=1, le=24, title="Entry window (candles)",
+                                      description="Entries allowed from reference close for this many candles")
+    exit_offset_min: int = Field(15, ge=1, le=375, title="Hard exit offset (minutes)",
+                                 description="Hard exit = reference START + this many minutes")
+
     @field_validator("reference_candle_starts", mode="before")
     @classmethod
     def _parse_times(cls, v: Any) -> Any:
@@ -138,8 +183,7 @@ class NiftyRefBreakoutSettings(StrategySettings):
     def _cross_checks(self) -> "NiftyRefBreakoutSettings":
         tf = self.candle_timeframe_min
         for t in self.reference_candle_starts:
-            if (t.hour * 60 + t.minute) % tf:
-                raise ValueError(f"reference start {fmt_hm(t)} is not aligned to the {tf}-minute timeframe")
+            check_slot_basics(t, tf)
             exit_dt = datetime.combine(date.today(), t) + timedelta(minutes=self.exit_offset_min,
                                                                     seconds=-self.exit_early_sec)
             if exit_dt.time() > MARKET_CLOSE or exit_dt.date() != date.today():
@@ -158,13 +202,12 @@ class NiftyRefBreakoutSettings(StrategySettings):
                     f"reference start + {last_close} min, which is not before the hard exit (start + "
                     f"{self.exit_offset_min} min), so it could never trigger an entry. To fix it, {hint}set "
                     f"Hard exit offset to at least {last_close + tf} min")
-        if self.underlying in BSE_INDICES and self.exchange != "BSE":
-            raise ValueError(f"{self.underlying} trades on BSE: set Index exchange to BSE")
-        if self.exchange == "BSE" and self.underlying not in BSE_INDICES:
-            raise ValueError(f"{self.underlying} is not a BSE index: set Index exchange to NSE")
-        if self.take_profit_mode is not TakeProfitMode.NONE and self.take_profit_value <= 0:
-            raise ValueError("take_profit_value must be > 0 when a take-profit mode is selected")
         return self
+
+    def slot_times(self) -> list[tuple[time, timedelta, timedelta]]:
+        tf = timedelta(minutes=self.candle_timeframe_min)
+        return [(t, tf + tf * self.entry_window_candles, timedelta(minutes=self.exit_offset_min))
+                for t in self.reference_candle_starts]
 
 
 class SlotState(str, Enum):
@@ -238,16 +281,14 @@ class Slot:
 
 
 # ------------------------------------------------------------------ pure rule helpers (unit tested)
-def build_slots(settings: NiftyRefBreakoutSettings, day: date) -> list[Slot]:
+def build_slots(settings: BreakoutBaseSettings, day: date) -> list[Slot]:
     tf = timedelta(minutes=settings.candle_timeframe_min)
+    early = timedelta(seconds=settings.exit_early_sec)
     slots = []
-    for i, t in enumerate(settings.reference_candle_starts, start=1):
+    for i, (t, entry_off, exit_off) in enumerate(settings.slot_times(), start=1):
         start = combine(day, t)
-        end = start + tf
-        slots.append(Slot(no=i, day=day, ref_start=start, ref_end=end,
-                          entry_end=end + tf * settings.entry_window_candles,
-                          exit_at=start + timedelta(minutes=settings.exit_offset_min,
-                                                    seconds=-settings.exit_early_sec)))
+        slots.append(Slot(no=i, day=day, ref_start=start, ref_end=start + tf, entry_end=start + entry_off,
+                          exit_at=start + exit_off - early))
     return slots
 
 
@@ -280,7 +321,7 @@ def spot_sl_hit(direction: Direction, spot: float, ref_high: float, ref_low: flo
     return spot <= level if side == "below" else spot >= level
 
 
-def take_profit_level(settings: NiftyRefBreakoutSettings, direction: Direction, entry_spot: float,
+def take_profit_level(settings: BreakoutBaseSettings, direction: Direction, entry_spot: float,
                       sl_level: float) -> tuple[float | None, str, float | None]:
     """Returns (tp_spot_level, tp_spot_side, tp_premium_pct)."""
     mode, v = settings.take_profit_mode, settings.take_profit_value
@@ -315,9 +356,9 @@ class NiftyRefBreakout(Strategy):
     version: ClassVar[str] = "2.0"
     settings_model: ClassVar[type[StrategySettings]] = NiftyRefBreakoutSettings
 
-    def __init__(self, settings: NiftyRefBreakoutSettings, ctx: Any) -> None:
+    def __init__(self, settings: BreakoutBaseSettings, ctx: Any) -> None:
         super().__init__(settings, ctx)
-        self.settings: NiftyRefBreakoutSettings = settings
+        self.settings: BreakoutBaseSettings = settings
         self.day: date | None = None
         self.slots: list[Slot] = []
         self.spot: Instrument | None = None
@@ -607,7 +648,7 @@ class NiftyRefBreakout(Strategy):
         return not any(s.state in ACTIVE_STATES for s in self.slots)
 
     def apply_settings(self, new: StrategySettings) -> None:
-        assert isinstance(new, NiftyRefBreakoutSettings)
+        assert isinstance(new, BreakoutBaseSettings)
         self.settings = new
         if self.day is None:
             return
@@ -619,7 +660,7 @@ class NiftyRefBreakout(Strategy):
         fresh = [s for s in fresh if s.ref_start not in kept_ids]
         merged = sorted(keep + fresh, key=lambda s: s.ref_start)
         # renumber pending slots so numbering follows the new schedule
-        schedule = {combine(self.day, t): i for i, t in enumerate(new.reference_candle_starts, start=1)}
+        schedule = {x.ref_start: x.no for x in build_slots(new, self.day)}
         for s in merged:
             if s.state is SlotState.PENDING and s.ref_start in schedule:
                 s.no = schedule[s.ref_start]

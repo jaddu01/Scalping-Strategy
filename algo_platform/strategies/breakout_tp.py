@@ -18,11 +18,13 @@ from pydantic import Field, model_validator
 from brokers.base import Candle
 from strategies.base import Direction, PartialTarget, StrategySettings, TakeProfitMode
 from strategies.nifty_early_breakout import EARLY_REF_STARTS
-from strategies.nifty_ref_breakout import NiftyRefBreakout, NiftyRefBreakoutSettings
+from strategies.nifty_ref_breakout import BreakoutBaseSettings, NiftyRefBreakout, NiftyRefBreakoutSettings
 from strategies.registry import register
 
 
-class NiftyRefBreakoutTPSettings(NiftyRefBreakoutSettings):
+class TPSettings(BreakoutBaseSettings):
+    """TP1 / TP2 fields and checks; combined with any breakout schedule (see the classes below)."""
+
     tp_enabled: bool = Field(
         True, title="Use TP1 / TP2",
         description="On: sell TP1 lots and TP2 lots at the targets, the rest at the spot SL or timed exit. "
@@ -42,7 +44,7 @@ class NiftyRefBreakoutTPSettings(NiftyRefBreakoutSettings):
                           description="Lots sold at TP2; 0 = automatic (40 % of Lots: 5 -> 2, 10 -> 4)")
 
     @model_validator(mode="after")
-    def _tp_checks(self) -> "NiftyRefBreakoutTPSettings":
+    def _tp_checks(self) -> "TPSettings":
         if not self.tp_enabled:
             return self  # targets are ignored while switched off
         if self.take_profit_mode is not TakeProfitMode.NONE:
@@ -65,6 +67,10 @@ class NiftyRefBreakoutTPSettings(NiftyRefBreakoutSettings):
         return self.tp1_lots, self.tp2_lots
 
 
+class NiftyRefBreakoutTPSettings(TPSettings, NiftyRefBreakoutSettings):
+    """Original schedule + TP1/TP2."""
+
+
 class NiftyEarlyBreakoutTPSettings(NiftyRefBreakoutTPSettings):
     reference_candle_starts: list[time] = Field(
         default_factory=lambda: [time.fromisoformat(t) for t in EARLY_REF_STARTS],
@@ -75,7 +81,7 @@ class NiftyEarlyBreakoutTPSettings(NiftyRefBreakoutTPSettings):
                       description="Lots per trade; lot size is read from the broker instrument master")
 
 
-def tp_levels(settings: NiftyRefBreakoutTPSettings, direction: Direction, entry_spot: float,
+def tp_levels(settings: TPSettings, direction: Direction, entry_spot: float,
               ref: Candle) -> list[PartialTarget]:
     lots1, lots2 = settings.split()
     out = []
@@ -102,7 +108,7 @@ class NiftyRefBreakoutTP(NiftyRefBreakout):
     settings_model: ClassVar[type[StrategySettings]] = NiftyRefBreakoutTPSettings
 
     def partial_targets(self, direction: Direction, entry_spot: float, ref: Candle) -> list[PartialTarget]:
-        assert isinstance(self.settings, NiftyRefBreakoutTPSettings)
+        assert isinstance(self.settings, TPSettings)
         if not self.settings.tp_enabled:
             return []
         return tp_levels(self.settings, direction, entry_spot, ref)

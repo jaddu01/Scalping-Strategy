@@ -80,7 +80,11 @@ def build_fields(model: type[BaseModel], values: dict[str, Any] | BaseModel | No
     choices = choices or {}
     saved_secrets = saved_secrets or set()
     out: list[FormField] = []
-    for name, fi in model.model_fields.items():
+    # a model can list the fields to show first (e.g. a strategy's schedule) via FORM_FIRST
+    first = [n for n in getattr(model, "FORM_FIRST", ()) if n in model.model_fields]
+    ordered = first + [n for n in model.model_fields if n not in first]
+    for name in ordered:
+        fi = model.model_fields[name]
         path = f"{prefix}{name}"
         tp, optional = _unwrap_optional(fi.annotation)
         label = fi.title or name.replace("_", " ").capitalize()

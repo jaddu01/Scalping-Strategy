@@ -110,7 +110,7 @@ def test_full_ui_flow(client):
 
     # --- every page renders
     for url in ["/", "/strategies", f"/strategies/{iid}", f"/strategies/{iid}/edit", f"/strategies/{iid}/slots",
-                "/accounts", f"/accounts/{aid}/edit", "/settings", "/compare", "/compare?period=all&show=all", "/compare?period=custom&day_from=2026-01-01&day_to=2026-12-31", "/trades", "/orders", "/orders?external=1",
+                "/accounts", f"/accounts/{aid}/edit", "/settings", "/strategies/new?template=nifty_two_entry", "/strategies/new?template=nifty_two_entry_tp", "/compare", "/compare?period=all&show=all", "/compare?period=custom&day_from=2026-01-01&day_to=2026-12-31", "/trades", "/orders", "/orders?external=1",
                 "/logs", "/backtest", f"/backtest?instance_id={iid}", "/users", "/audit", "/profile",
                 "/api/state", f"/api/instances/{iid}/detail", "/api/events?limit=50", "/trades.csv",
                 "/api/events/export?fmt=csv", "/api/events/export?fmt=json", "/settings/export.yaml"]:
