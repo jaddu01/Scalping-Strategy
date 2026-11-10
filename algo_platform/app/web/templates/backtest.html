@@ -36,6 +36,17 @@
   {% if is_admin %}<div><button class="primary" type="submit">Run backtest</button></div>{% endif %}
 </form>
 </div>
+<div class="panel"><h2 style="margin-top:0">Recorded market data</h2>
+  <p class="small muted">Every tick of the index and its ATM ± N options during market hours, plus the options' real 1-minute
+    candles after the close (Global Settings → Recorder).
+    {% if recorder and recorder.recording %}<b>Recording now:</b> {{ recorder.ticks_today }} ticks on {{ recorder.instruments }} instruments, last {{ recorder.last_tick or '–' }}.{% endif %}</p>
+  <table><thead><tr><th>Day</th><th class="num">Ticks</th><th class="num">Instruments</th><th class="num">Option candles</th><th>Files</th></tr></thead>
+  <tbody>{% for d in recordings %}<tr><td>{{ d.day }}{% if not d.complete %} <span class="badge amber">in progress</span>{% endif %}</td>
+    <td class="num">{{ d.ticks if d.ticks is not none else '–' }}</td><td class="num">{{ d.instruments if d.instruments is not none else '–' }}</td>
+    <td class="num">{{ d.candle_rows if d.candle_rows is not none else '–' }}</td>
+    <td class="small">{% for name, size in d.files|dictsort %}<a href="/recordings/{{ d.day }}/{{ name }}">{{ name }}</a> ({{ '%.1f'|format(size / 1048576) }} MB){{ ' · ' if not loop.last }}{% endfor %}</td></tr>
+  {% else %}<tr><td colspan="5" class="muted">Nothing recorded yet — recording starts at the next market open.</td></tr>{% endfor %}</tbody></table>
+</div>
 <div class="panel"><h2 style="margin-top:0">Recent runs</h2>
   <table><thead><tr><th>#</th><th>When</th><th>Range</th><th class="num">Trades</th><th class="num">Win %</th><th class="num">Net</th></tr></thead>
   <tbody>{% for r in runs %}<tr><td><a href="/backtest/{{ r.id }}">{{ r.id }}</a></td><td class="small">{{ r.created_at|dt }}</td><td class="small">{{ r.config.day_from }} → {{ r.config.day_to }}</td>

@@ -7,9 +7,9 @@ from __future__ import annotations
 
 from datetime import time
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from core.clock import fmt_hm
 
@@ -108,6 +108,29 @@ class GeneralSettings(_M):
     trade_on_weekends: bool = Field(False, title="Allow trading on weekends (special sessions)")
 
 
+class RecorderSettings(_M):
+    enabled: bool = Field(True, title="Record market ticks",
+                          description="Saves every tick of the index and its ATM ± N option strikes during market "
+                                      "hours, plus the strikes' real 1-minute candles after the close — for exact "
+                                      "backtests and replays later")
+    underlyings: list[str] = Field(default_factory=lambda: ["NIFTY"], title="Indices to record",
+                                   description="Comma separated, e.g. NIFTY, BANKNIFTY, SENSEX")
+    strikes_each_side: int = Field(5, ge=0, le=20, title="Strikes each side of ATM",
+                                   description="5 = ATM ± 5 strikes, CE and PE (22 options); re-centred as the index moves")
+    expiries: Literal["nearest", "nearest_and_next"] = Field("nearest", title="Expiries to record")
+    download_option_candles: bool = Field(True, title="Download option 1-minute candles after the close",
+                                          description="While the contracts still exist (expired ones cannot be "
+                                                      "downloaded later)")
+    retention_days: int = Field(90, ge=1, le=3650, title="Keep recordings for (days)")
+
+    @field_validator("underlyings", mode="before")
+    @classmethod
+    def _split(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            v = [p.strip() for p in v.replace(";", ",").split(",")]
+        return [str(x).strip().upper() for x in v if str(x).strip()]
+
+
 class GlobalSettings(_M):
     general: GeneralSettings = Field(default_factory=GeneralSettings)
     market: MarketHours = Field(default_factory=MarketHours)
@@ -116,6 +139,7 @@ class GlobalSettings(_M):
     notifications: Notifications = Field(default_factory=Notifications)
     sync: Sync = Field(default_factory=Sync)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    recorder: RecorderSettings = Field(default_factory=RecorderSettings)
 
 
 class InstanceRiskLimits(_M):

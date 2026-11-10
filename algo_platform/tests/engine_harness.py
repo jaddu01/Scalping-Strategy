@@ -95,7 +95,7 @@ async def build_env(tmp_path: Path, start: datetime | None = None, instances: li
             s.add(inst)
             s.flush()
             ids.append(inst.id)
-    p = Platform(cfg, db, clock=clock, db_events=False, file_events=False)
+    p = Platform(cfg, db, clock=clock, db_events=False, file_events=False, record_ticks=False)
     env = Env(platform=p, db=db, clock=clock, account_id=acc_id, instance_ids=ids)
     p.bus.add_sink(env.events.append)
     await p.start()

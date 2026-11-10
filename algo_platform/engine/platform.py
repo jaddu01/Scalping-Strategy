@@ -22,6 +22,7 @@ from core.events import Category, ConsoleSink, EventBus, JsonlFileSink, Level
 from core.settings_schema import GlobalSettings
 from engine.accounts import AccountRuntime
 from engine.calendar import MarketCalendar
+from engine.recorder import TickRecorder
 from engine.charges import option_charges
 from engine.exit_manager import ExitManager
 from engine.market_data import FeedCandidate, MarketDataService, series_of
@@ -41,8 +42,9 @@ log = logging.getLogger("algo.platform")
 
 class Platform:
     def __init__(self, config: AppConfig, db: Database, clock: Clock | None = None,
-                 db_events: bool = True, file_events: bool = True) -> None:
+                 db_events: bool = True, file_events: bool = True, record_ticks: bool = True) -> None:
         self.config = config
+        self.record_ticks = record_ticks
         self.db = db
         self.clock = clock or Clock()
         self.bus = EventBus()
@@ -59,6 +61,8 @@ class Platform:
         self.calendar = MarketCalendar(self.settings, holidays(db))
         self.market = MarketDataService(self.bus, self.clock, self.calendar, lambda: self.settings)
         self.market.candidates = self._feed_candidates
+        self.recorder = TickRecorder(self.market, self.calendar, self.clock, self.bus, lambda: self.settings,
+                                     config.data_dir / "recordings")
         self.orders = OrderManager(db, self.bus, self.clock)
         self.exits = ExitManager(self.clock, lambda: self.settings.sync.mtm_snapshot_sec)
         self.risk = RiskManager(self.bus, self.clock, lambda: self.settings)
@@ -88,6 +92,8 @@ class Platform:
         self.telegram.start()
         self.market.start()
         self.exits.start()
+        if self.record_ticks:
+            self.recorder.start()
         self.risk.start(self.strategies.limits, lambda: list(self.accounts.values()))
         with self.db.session() as s:
             rows = list(s.scalars(select(BrokerAccount).where(BrokerAccount.enabled.is_(True))))
@@ -108,6 +114,7 @@ class Platform:
             t.cancel()
         await self.strategies.stop_all()
         await self.exits.stop()
+        await self.recorder.stop()
         await self.risk.stop()
         await self.market.stop()
         for acc in list(self.accounts.values()):

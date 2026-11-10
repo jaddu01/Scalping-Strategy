@@ -6,7 +6,7 @@ from datetime import date, time, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
 from pydantic import ValidationError
 from sqlalchemy import select
 
@@ -33,7 +33,10 @@ def _ctx(request: Request, template_id: str, params: Any, errors: dict[str, str]
         accounts = [(a.id, a.label) for a in s.scalars(select(BrokerAccount).order_by(BrokerAccount.label))]
         runs = list(s.scalars(select(BacktestRun).order_by(BacktestRun.id.desc()).limit(15)))
     today = date.today()
-    return {"templates_list": [(k, v.display_name) for k, v in all_templates().items() if not k.startswith("test_")],
+    p = request.app.state.platform
+    recorder = getattr(p, "recorder", None) if p is not None else None
+    return {"recordings": recorder.days()[:30] if recorder else [], "recorder": recorder.status() if recorder else None,
+            "templates_list": [(k, v.display_name) for k, v in all_templates().items() if not k.startswith("test_")],
             "template_id": template_id, "fields": build_fields(cls.settings_model, params, errors, "params."),
             "general_errors": general or [], "instances": instances, "accounts": accounts, "runs": runs,
             "cfg": cfg or {"day_from": (today - timedelta(days=20)).isoformat(), "day_to": today.isoformat(),
@@ -156,3 +159,24 @@ async def candles_csv(rid: int, request: Request, user: SessionInfo = Depends(cu
     name = f"{exch}_{und}_{cfg['day_from']}_{cfg['day_to']}.csv"
     return PlainTextResponse(text, media_type="text/csv",
                              headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+RECORDING_FILES = {"ticks.csv.gz", "candles_1m.csv.gz", "instruments.json", "manifest.json"}
+
+
+@router.get("/recordings/{day}/{name}")
+async def recording_file(day: str, name: str, request: Request, user: SessionInfo = Depends(current_user)) -> Response:
+    """Download one recorded file (names and dates are whitelisted, so no path can escape the folder)."""
+    try:
+        date.fromisoformat(day)
+    except ValueError:
+        raise HTTPException(404, "no such day") from None
+    if name not in RECORDING_FILES:
+        raise HTTPException(404, "no such file")
+    p = request.app.state.platform
+    if p is None:
+        raise HTTPException(404, "engine not running")
+    path = p.recorder.day_dir(date.fromisoformat(day)) / name
+    if not path.is_file():
+        raise HTTPException(404, "not recorded")
+    return FileResponse(path, filename=f"{day}_{name}")
