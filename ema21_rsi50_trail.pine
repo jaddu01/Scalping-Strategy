@@ -1,0 +1,212 @@
+//@version=6
+// EMA 21 + RSI 50 Breakout - with trailing stop and end-of-day square-off
+// Same entry rules as "EMA21 + RSI50 Breakout (Candle SL)":
+//   1. Candle closes across the 21 EMA
+//   2. RSI crosses 50 the same way within N candles -> the later candle is the confirmation candle
+//   3. Entry when a following candle breaks the confirmation candle's high (long) / low (short)
+//   Stop : confirmation candle low (long) / high (short)
+// Exit choices (Inputs):
+//   - RSI level      : exit when RSI reaches 70 (long) / 30 (short)
+//   - Trailing stop  : stop follows the best price since entry, x ATR behind it
+//   - RSI or trailing: whichever comes first
+//   - Early exit (candle closes back through the 21 EMA) can be switched off
+//   - Square-off at a set time, and no new entries after a cut-off time
+// For education/backtesting only - not financial advice.
+
+strategy("EMA21 + RSI50 Breakout (Trail + EOD)", shorttitle="EMA-RSI Trail", overlay=false,
+      initial_capital=100000, default_qty_type=strategy.fixed, default_qty_value=1,
+      commission_type=strategy.commission.percent, commission_value=0.03,
+      process_orders_on_close=true, pyramiding=0, max_labels_count=500)
+
+// --------- Inputs ---------
+grpI = "Indicators"
+emaLen = input.int(21, "EMA length", minval=1, group=grpI)
+rsiLen = input.int(14, "RSI length", minval=1, group=grpI)
+rsiMid = input.float(50, "RSI middle level", group=grpI)
+rsiOB  = input.float(70, "RSI upper level (long exit)", group=grpI)
+rsiOS  = input.float(30, "RSI lower level (short exit)", group=grpI)
+
+grpR = "Entry rules"
+syncBars  = input.int(3, "Max candles between EMA cross and RSI cross", minval=1, group=grpR)
+validBars = input.int(2, "Candles allowed for the breakout", minval=1, group=grpR)
+offTicks  = input.int(1, "Entry/stop buffer (ticks)", minval=0, group=grpR)
+
+grpX = "Exits"
+exitMode  = input.string("Trailing stop", "Exit type", options=["RSI level", "Trailing stop", "RSI or trailing"], group=grpX)
+trailAtr  = input.float(1.5, "Trailing stop distance (x ATR)", minval=0.25, step=0.25, group=grpX)
+trailFrom = input.float(0.0, "Start trailing after profit of x R (0 = at once)", minval=0, step=0.25, group=grpX)
+earlyExit = input.bool(false, "Early exit: candle closes back through the 21 EMA", group=grpX)
+
+grpT = "Session (IST)"
+useEod     = input.bool(true, "Square off all trades at day end", group=grpT)
+eodSess    = input.session("1510-1530", "Square-off window (starts on the last 5m candle, 15:10)", group=grpT)
+entrySess  = input.session("0915-1500", "New entries allowed", group=grpT)
+
+grpF = "Trades"
+allowLong  = input.bool(true, "Take long (buy) trades", group=grpF)
+allowShort = input.bool(true, "Take short (sell) trades", group=grpF)
+
+grpD = "Display"
+showLabels = input.bool(true, "Show BUY / SELL / EXIT labels", group=grpD)
+
+// --------- Calculations ---------
+ema21 = ta.ema(close, emaLen)
+rsi   = ta.rsi(close, rsiLen)
+atrV  = ta.atr(14)
+buf   = offTicks * syminfo.mintick
+
+inEod   = useEod and not na(time(timeframe.period, eodSess, "Asia/Kolkata"))
+inEntry = not na(time(timeframe.period, entrySess, "Asia/Kolkata"))
+
+pxUp  = ta.crossover(close, ema21)
+pxDn  = ta.crossunder(close, ema21)
+rsiUp = ta.crossover(rsi, rsiMid)
+rsiDn = ta.crossunder(rsi, rsiMid)
+
+bsPxUp  = ta.barssince(pxUp)
+bsRsiUp = ta.barssince(rsiUp)
+bsPxDn  = ta.barssince(pxDn)
+bsRsiDn = ta.barssince(rsiDn)
+
+longConf  = allowLong  and (pxUp or rsiUp) and bsPxUp < syncBars and bsRsiUp < syncBars and close > ema21 and rsi > rsiMid
+shortConf = allowShort and (pxDn or rsiDn) and bsPxDn < syncBars and bsRsiDn < syncBars and close < ema21 and rsi < rsiMid
+
+flat       = strategy.position_size == 0
+longArmed  = longConf and flat and inEntry
+shortArmed = shortConf and flat and inEntry
+
+useRsi   = exitMode != "Trailing stop"
+useTrail = exitMode != "RSI level"
+
+// --------- State ---------
+var bool  longPending  = false
+var float longLevel    = na
+var float longStop     = na
+var int   longBar      = na
+var bool  shortPending = false
+var float shortLevel   = na
+var float shortStop    = na
+var int   shortBar     = na
+var float bestPx       = na   // best price since entry (high for longs, low for shorts)
+var float riskPts      = na
+
+if longArmed
+    longPending  := true
+    longLevel    := high + buf
+    longStop     := low - buf
+    longBar      := bar_index
+    shortPending := false
+    strategy.cancel("Short")
+
+if shortArmed
+    shortPending := true
+    shortLevel   := low - buf
+    shortStop    := high + buf
+    shortBar     := bar_index
+    longPending  := false
+    strategy.cancel("Long")
+
+if longPending and strategy.position_size > 0
+    longPending := false
+if shortPending and strategy.position_size < 0
+    shortPending := false
+
+if longPending and bar_index > longBar and (bar_index - longBar >= validBars or close < ema21 or not inEntry)
+    longPending := false
+    strategy.cancel("Long")
+if shortPending and bar_index > shortBar and (bar_index - shortBar >= validBars or close > ema21 or not inEntry)
+    shortPending := false
+    strategy.cancel("Short")
+
+// --------- Trailing stop ---------
+newLong  = strategy.position_size > 0 and strategy.position_size[1] <= 0
+newShort = strategy.position_size < 0 and strategy.position_size[1] >= 0
+if newLong
+    bestPx  := high
+    riskPts := strategy.position_avg_price - longStop
+else if newShort
+    bestPx  := low
+    riskPts := shortStop - strategy.position_avg_price
+else if strategy.position_size > 0
+    bestPx := math.max(bestPx, high)
+else if strategy.position_size < 0
+    bestPx := math.min(bestPx, low)
+
+float longTrail  = na
+float shortTrail = na
+if useTrail and strategy.position_size > 0 and bestPx - strategy.position_avg_price >= trailFrom * riskPts
+    longTrail := bestPx - trailAtr * atrV
+if useTrail and strategy.position_size < 0 and strategy.position_avg_price - bestPx >= trailFrom * riskPts
+    shortTrail := bestPx + trailAtr * atrV
+
+longStopNow  = na(longTrail)  ? longStop  : math.max(longStop, longTrail)
+shortStopNow = na(shortTrail) ? shortStop : math.min(shortStop, shortTrail)
+// keep the trail from moving backwards
+var float lockedLong  = na
+var float lockedShort = na
+lockedLong  := strategy.position_size > 0 ? (newLong  ? longStopNow  : math.max(nz(lockedLong,  longStopNow),  longStopNow))  : na
+lockedShort := strategy.position_size < 0 ? (newShort ? shortStopNow : math.min(nz(lockedShort, shortStopNow), shortStopNow)) : na
+
+// --------- Orders ---------
+if longPending
+    strategy.entry("Long", strategy.long, stop=longLevel, comment="Buy breakout")
+if shortPending
+    strategy.entry("Short", strategy.short, stop=shortLevel, comment="Sell breakdown")
+
+if longPending
+    strategy.exit("Long SL", from_entry="Long", stop=longStop, comment_loss="SL", comment_profit="Trail")
+else if strategy.position_size > 0
+    strategy.exit("Long SL", from_entry="Long", stop=lockedLong, comment_loss="SL", comment_profit="Trail")
+if shortPending
+    strategy.exit("Short SL", from_entry="Short", stop=shortStop, comment_loss="SL", comment_profit="Trail")
+else if strategy.position_size < 0
+    strategy.exit("Short SL", from_entry="Short", stop=lockedShort, comment_loss="SL", comment_profit="Trail")
+
+string exitText = na
+if strategy.position_size > 0
+    if inEod
+        strategy.close("Long", comment="EOD")
+        exitText := "EXIT\nEOD"
+    else if useRsi and rsi >= rsiOB
+        strategy.close("Long", comment="RSI " + str.tostring(rsiOB))
+        exitText := "EXIT\nRSI " + str.tostring(rsiOB)
+    else if earlyExit and close < ema21
+        strategy.close("Long", comment="Early exit")
+        exitText := "EXIT\nearly"
+
+if strategy.position_size < 0
+    if inEod
+        strategy.close("Short", comment="EOD")
+        exitText := "EXIT\nEOD"
+    else if useRsi and rsi <= rsiOS
+        strategy.close("Short", comment="RSI " + str.tostring(rsiOS))
+        exitText := "EXIT\nRSI " + str.tostring(rsiOS)
+    else if earlyExit and close > ema21
+        strategy.close("Short", comment="Early exit")
+        exitText := "EXIT\nearly"
+
+// --------- Labels ---------
+if showLabels and newLong
+    label.new(bar_index, low, "BUY\n" + str.tostring(strategy.position_avg_price, format.mintick) + "\nSL " + str.tostring(longStop, format.mintick),
+          style=label.style_label_up, color=color.green, textcolor=color.white, size=size.small, force_overlay=true)
+if showLabels and newShort
+    label.new(bar_index, high, "SELL\n" + str.tostring(strategy.position_avg_price, format.mintick) + "\nSL " + str.tostring(shortStop, format.mintick),
+          style=label.style_label_down, color=color.red, textcolor=color.white, size=size.small, force_overlay=true)
+if showLabels and not na(exitText)
+    label.new(bar_index, high, exitText, style=label.style_label_down, color=color.blue, textcolor=color.white, size=size.tiny, force_overlay=true)
+
+// --------- Plots ---------
+plot(rsi, "RSI", color=color.purple, linewidth=2)
+hline(rsiOB,  "Upper",  color=color.gray,   linestyle=hline.style_dotted)
+hline(rsiMid, "Middle", color=color.yellow, linestyle=hline.style_dotted)
+hline(rsiOS,  "Lower",  color=color.gray,   linestyle=hline.style_dotted)
+plot(ema21, "EMA 21", color=color.orange, linewidth=2, force_overlay=true)
+plot(longPending  ? longLevel  : na, "Long trigger",  color=color.green, style=plot.style_linebr, force_overlay=true)
+plot(shortPending ? shortLevel : na, "Short trigger", color=color.red,   style=plot.style_linebr, force_overlay=true)
+plot(strategy.position_size > 0 ? lockedLong : strategy.position_size < 0 ? lockedShort : na, "Stop / trail", color=color.red, style=plot.style_linebr, linewidth=2, force_overlay=true)
+
+// --------- Alerts ---------
+if longArmed
+    alert("EMA-RSI LONG setup on " + syminfo.ticker + ": buy above " + str.tostring(longLevel, format.mintick) + ", SL " + str.tostring(longStop, format.mintick), alert.freq_once_per_bar_close)
+if shortArmed
+    alert("EMA-RSI SHORT setup on " + syminfo.ticker + ": sell below " + str.tostring(shortLevel, format.mintick) + ", SL " + str.tostring(shortStop, format.mintick), alert.freq_once_per_bar_close)
