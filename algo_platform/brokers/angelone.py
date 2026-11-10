@@ -28,6 +28,7 @@ from brokers.base import (
     BrokerAdapter,
     BrokerCredentials,
     BrokerError,
+    BrokerRateLimited,
     Candle,
     Exchange,
     Fill,
@@ -309,6 +310,15 @@ def map_ws_tick(data: dict[str, Any]) -> Tick | None:
 
 
 # --------------------------------------------------------------------------- adapter
+RATE_LIMIT_RETRY_SEC = 1.1
+RATE_LIMIT_TEXT = ("exceeding access rate", "access denied because of exceeding", "too many requests")
+
+
+def is_rate_limited(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(t in text for t in RATE_LIMIT_TEXT)
+
+
 class AngelOneAdapter(BrokerAdapter):
     broker_type: ClassVar[str] = "angelone"
     display_name: ClassVar[str] = "Angel One (SmartAPI)"
@@ -375,7 +385,8 @@ class AngelOneAdapter(BrokerAdapter):
             return resp.get("data")
         return resp
 
-    async def _call(self, bucket: str, what: str, fn_name: str, *args: Any, _retry_login: bool = True) -> Any:
+    async def _call(self, bucket: str, what: str, fn_name: str, *args: Any, _retry_login: bool = True,
+                    _retry_rate: bool = True) -> Any:
         if self._api is None:
             raise SessionExpired("not logged in")
         await self.limiter.acquire(bucket)
@@ -392,6 +403,13 @@ class AngelOneAdapter(BrokerAdapter):
             raise
         except Exception as exc:
             name = type(exc).__name__
+            if is_rate_limited(exc):
+                # Angel occasionally refuses a call even within its documented limits: wait, retry once
+                if _retry_rate:
+                    await asyncio.sleep(RATE_LIMIT_RETRY_SEC)
+                    return await self._call(bucket, what, fn_name, *args, _retry_login=_retry_login,
+                                            _retry_rate=False)
+                raise BrokerRateLimited(f"{what}: rate limited by Angel ({exc})", retryable=True) from exc
             if name == "TokenException":
                 if not _retry_login:
                     raise SessionExpired(str(exc)) from exc

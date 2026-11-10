@@ -233,6 +233,10 @@ class Profile(_Model):
     exchanges: list[str] = Field(default_factory=list)
 
 
+class RateLimited(Exception):
+    """Marker mixin: the broker refused the call for exceeding its rate limit (safe to retry shortly)."""
+
+
 class BrokerError(Exception):
     """Raised by adapters for any broker-side failure. `retryable` drives backoff logic."""
 
@@ -243,6 +247,10 @@ class BrokerError(Exception):
         self.code = code
         self.response = response
 
+
+
+class BrokerRateLimited(BrokerError, RateLimited):
+    """The broker refused the call for exceeding its rate limit."""
 
 class OrderRejected(BrokerError):
     pass

@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 from sqlalchemy import select
 
-from brokers.base import BrokerAdapter, BrokerError, Fill, Order, OrderStatus, Position, Side
+from brokers.base import BrokerAdapter, BrokerError, Fill, Order, OrderStatus, Position, RateLimited, Side
 from brokers.paper import PaperBroker, PaperCredentials
 from brokers.ratelimit import retry_async
 from brokers.registry import create_adapter, get_broker_class, is_stub
@@ -72,8 +72,15 @@ class BrokerSync:
     """Keeps the platform's view of one adapter's orders/positions/fills equal to the broker's."""
 
     def __init__(self, adapter: BrokerAdapter, account_id: int, account_label: str, paper: bool, db: Database,
-                 bus: EventBus, clock: Clock, poll_interval: Callable[[], float]) -> None:
+                 bus: EventBus, clock: Clock, poll_interval: Callable[[], float],
+                 interval_fn: "Callable[[BrokerSync], float] | None" = None,
+                 rate_alert_sec: Callable[[], float] = lambda: 30.0) -> None:
         self.adapter = adapter
+        # interval_fn: adaptive poll interval (market hours / open trades); falls back to poll_interval()
+        self.interval_fn = interval_fn
+        self.rate_alert_sec = rate_alert_sec
+        self._rate_limited_since: datetime | None = None
+        self._rate_alerted = False
         self.account_id = account_id
         self.account_label = account_label
         self.paper = paper
@@ -264,12 +271,33 @@ class BrokerSync:
                 self.health.last_poll_at = self.clock.now()
                 self.health.polls += 1
                 self.health.last_error = None
+            except RateLimited as exc:
+                # the broker refused for its rate limit (already retried once): stay quiet unless it persists
+                now = self.clock.now()
+                self.health.last_error = str(exc)
+                if self._rate_limited_since is None:
+                    self._rate_limited_since = now
+                stuck = (now - self._rate_limited_since).total_seconds()
+                log.debug("%s rate limited (%ss): %s", self.name, round(stuck), exc)
+                if stuck >= self.rate_alert_sec() and not self._rate_alerted:
+                    self._rate_alerted = True
+                    self._emit(Category.ERROR, "SYNC_RATE_LIMITED",
+                               f"{self.name}: the broker has refused order/position syncs for {stuck:.0f}s "
+                               f"(rate limit) — check that no other app or script is using this API key",
+                               Level.ERROR, seconds=stuck)
+                return
             except BrokerError as exc:
                 self.health.last_error = str(exc)
                 self._emit(Category.ERROR, "SYNC_POLL_FAILED", f"{self.name}: {exc}", Level.WARNING)
+                return
             except Exception as exc:
                 self.health.last_error = str(exc)
                 log.exception("poll failed")
+                return
+            if self._rate_limited_since is not None:
+                if self._rate_alerted:
+                    self._emit(Category.SYSTEM, "SYNC_RATE_LIMIT_CLEARED", f"{self.name}: syncing again", Level.INFO)
+                self._rate_limited_since, self._rate_alerted = None, False
 
     def _handle_fills(self, fills: list[Fill]) -> None:
         new = [f for f in fills if (f.fill_id, f.order_id) not in self.fills]
@@ -313,11 +341,25 @@ class BrokerSync:
                 pass
             self._task = None
 
+    def current_interval(self) -> float:
+        if self.interval_fn is not None:
+            try:
+                return float(self.interval_fn(self))
+            except Exception:
+                log.exception("poll interval function failed")
+        return float(self.poll_interval())
+
     async def _run(self) -> None:
+        loop = asyncio.get_running_loop()
+        last: float | None = None
         while True:
             try:
-                await self.poll_once(full=True)
-                await asyncio.sleep(self.poll_interval())
+                interval = self.current_interval()
+                # re-checked every second, so opening a trade switches to fast polling at once
+                if last is None or loop.time() - last >= interval:
+                    last = loop.time()
+                    await self.poll_once(full=True)
+                await asyncio.sleep(min(1.0, interval))
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -327,7 +369,11 @@ class BrokerSync:
 
 class AccountRuntime:
     def __init__(self, row: BrokerAccount, db: Database, bus: EventBus, clock: Clock,
-                 poll_interval: Callable[[], float], cache_dir: Any, price_source: Callable[..., Any] | None = None):
+                 poll_interval: Callable[[], float], cache_dir: Any, price_source: Callable[..., Any] | None = None,
+                 sync_interval: "Callable[[BrokerSync], float] | None" = None,
+                 rate_alert_sec: Callable[[], float] = lambda: 30.0):
+        self.sync_interval = sync_interval
+        self.rate_alert_sec = rate_alert_sec
         self.id = row.id
         self.label = row.label
         self.broker_type = row.broker_type
@@ -357,7 +403,7 @@ class AccountRuntime:
         self.adapter.on_connection_change(self._on_stream_state)
         self.paper_shadow: PaperBroker | None = None
         self.live_sync = BrokerSync(self.adapter, self.id, self.label, self.adapter.is_paper, db, bus, clock,
-                                    poll_interval)
+                                    poll_interval, sync_interval, rate_alert_sec)
         self.paper_sync: BrokerSync | None = None
         self._relogin_lock = asyncio.Lock()
 
@@ -422,7 +468,7 @@ class AccountRuntime:
                                             label=f"{self.label} (paper)")
             self._attach_paper_persistence(self.paper_shadow, f"shadow:{self.id}")
             self.paper_sync = BrokerSync(self.paper_shadow, self.id, self.label, True, self.db, self.bus, self.clock,
-                                         self.poll_interval)
+                                         self.poll_interval, self.sync_interval, self.rate_alert_sec)
         assert self.paper_sync is not None
         return self.paper_shadow, self.paper_sync
 

@@ -78,7 +78,15 @@ class Notifications(_M):
 
 
 class Sync(_M):
-    poll_interval_sec: float = Field(3.0, ge=1, le=60, title="Order/position backup poll interval (s)")
+    poll_interval_sec: float = Field(3.0, ge=1, le=60, title="Order/position backup poll interval (s)",
+                                     description="Used during market hours while a live trade or order is open")
+    poll_interval_flat_sec: float = Field(12.0, ge=1, le=120, title="Poll interval when flat (s)",
+                                          description="During market hours with no open live trade or order")
+    poll_interval_closed_sec: float = Field(60.0, ge=5, le=110, title="Poll interval outside market hours (s)",
+                                            description="Before pre-open, after close + 5 min, weekends, holidays")
+    rate_limit_alert_sec: float = Field(30.0, ge=5, le=600, title="Alert after broker rate-limiting for (s)",
+                                        description="Single 'exceeding access rate' replies are retried quietly; "
+                                                    "alert only when polls keep failing this long")
     pnl_tolerance: float = Field(5.0, ge=0, title="P&L reconciliation tolerance (₹)")
     tick_stale_sec: int = Field(15, ge=3, le=600, title="Tick feed stale after (s)")
     order_feed_stale_sec: int = Field(120, ge=10, le=3600, title="Order sync stale after (s)")

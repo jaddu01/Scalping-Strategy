@@ -120,10 +120,31 @@ class Platform:
         self.started = False
 
     # ------------------------------------------------------------------ accounts
+    def sync_poll_interval(self, sync: Any) -> float:
+        """How often a broker account's order/trade/position backup poll runs (order updates also arrive
+        on the broker's websocket; this is the safety net):
+          market hours + an open live trade or working order -> poll_interval_sec (3 s)
+          market hours, flat                                -> poll_interval_flat_sec (12 s)
+          outside market hours, weekends, holidays          -> poll_interval_closed_sec (60 s)
+        Simulated (paper) brokers are local and always use the fast interval."""
+        s = self.settings.sync
+        if getattr(sync.adapter, "is_paper", False):
+            return s.poll_interval_sec
+        now = self.clock.now()
+        m = self.settings.market
+        open_at = combine(now.date(), m.pre_open)
+        close_at = combine(now.date(), m.market_close) + timedelta(minutes=5)
+        if not (self.calendar.is_trading_day(now.date()) and open_at <= now <= close_at):
+            return s.poll_interval_closed_sec
+        busy = any(lt.account_id == sync.account_id and lt.mode == "live" for lt in list(self.trades.live.values()))
+        busy = busy or any(o.status.is_working for o in list(sync.orders.values()))
+        return s.poll_interval_sec if busy else s.poll_interval_flat_sec
+
     def _add_runtime(self, row: BrokerAccount) -> AccountRuntime | None:
         try:
             acc = AccountRuntime(row, self.db, self.bus, self.clock, lambda: self.settings.sync.poll_interval_sec,
-                                 self.config.cache_dir)
+                                 self.config.cache_dir, sync_interval=self.sync_poll_interval,
+                                 rate_alert_sec=lambda: self.settings.sync.rate_limit_alert_sec)
         except Exception as exc:
             self.bus.exception("ACCOUNT_LOAD_FAILED", f"account {row.label}", exc, account_id=row.id)
             return None
