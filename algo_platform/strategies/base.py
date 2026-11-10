@@ -134,6 +134,10 @@ class StrategyContext(Protocol):
         """The last `count` completed candles of `instrument` (oldest first), e.g. to warm up indicators."""
         ...
 
+    def tighten_stop(self, trade_id: str, level: float) -> None:
+        """Move the trade's spot stop-loss to `level` if that is tighter (trailing stop); never loosens it."""
+        ...
+
     async def request_exit(self, trade_id: str, reason: str, partial: str | None = None) -> None:
         """Ask the engine to close the trade (or, with `partial`, sell that scale-out target's lots, e.g.
         "tp1"). Used for exits decided by the strategy itself, such as an RSI level on candle close."""

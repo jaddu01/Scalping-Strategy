@@ -216,6 +216,14 @@ class BacktestContext:
                for k, g in sorted(groups.items()) if k + timedelta(minutes=timeframe_min) <= now]
         return out[-count:]
 
+    def tighten_stop(self, trade_id: str, level: float) -> None:
+        t = self.open
+        if t is None or t.trade_id != trade_id or t.state.spot_sl is None:
+            return
+        tighter = level > t.state.spot_sl if t.state.spot_sl_side == "below" else level < t.state.spot_sl
+        if tighter:
+            t.state.spot_sl, t.state.sl_reason = round(level, 2), "trailing_stop"
+
     async def request_exit(self, trade_id: str, reason: str, partial: str | None = None) -> None:
         """Strategy-decided exit, filled at once at the modelled premium (the live engine sends a market order)."""
         t = self.open

@@ -50,13 +50,14 @@ class ExitState:
     extra: dict[str, Any] = field(default_factory=dict)
     # scale-out targets: dicts {label, level, side, qty, done, filled, price}; shared with the live trade
     partials: list[dict[str, Any]] = field(default_factory=list)
+    sl_reason: str = "spot_stop_loss"  # "trailing_stop" once a strategy has moved the stop
 
 
 def evaluate_exit(st: ExitState, spot: float | None, premium: float | None, now: datetime) -> str | None:
     """Return the exit reason, or None. Checked in priority order on every update."""
     if spot is not None and st.spot_sl is not None:
         if (st.spot_sl_side == "below" and spot <= st.spot_sl) or (st.spot_sl_side == "above" and spot >= st.spot_sl):
-            return "spot_stop_loss"
+            return st.sl_reason
     if spot is not None and st.tp_spot_level is not None:
         if (st.tp_spot_side == "above" and spot >= st.tp_spot_level) or (
                 st.tp_spot_side == "below" and spot <= st.tp_spot_level):

@@ -13,7 +13,8 @@ Exits on this platform (TP1 / TP2 replace the script's single RSI 70 exit):
                  live RSI = RSI with the current tick as the forming candle's close (TradingView's real-time
                  value), so a target fires mid-candle; set "RSI targets checked on" to candle_close for the
                  Pine behaviour
-  rest           spot SL, the script's early exit (a candle closes back through EMA 21), or the 15:15 hard exit
+  trail          after TP1 the stop of the remaining lots trails 1.5 × ATR behind the best price since entry
+  rest           spot SL / trailing stop, the script's early exit (a close back through EMA 21), or the 15:15 hard exit
 New entries only between 09:20 and 15:00; one position at a time; risk checks as usual.
 """
 from __future__ import annotations
@@ -32,6 +33,8 @@ from strategies.base import Direction, EntrySignal, ExitPlan, PartialTarget, Str
 from strategies.nifty_ref_breakout import (BSE_INDICES, DERIVATIVE_EXCHANGE, MARKET_CLOSE, MARKET_OPEN, atm_strike,
                                            pick_expiry)
 from strategies.registry import register
+
+TRAIL_MIN_STEP = 0.5  # points; smaller moves of the trailing stop are not sent
 
 
 class EmaRsiBreakoutSettings(StrategySettings):
@@ -75,6 +78,13 @@ class EmaRsiBreakoutSettings(StrategySettings):
     tp2_rsi: float = Field(80, gt=0, lt=100, title="TP2: RSI level (long)",
                            description="Short trades use 100 − this (80 -> 20)")
     tp2_lots: int = Field(0, ge=0, le=200, title="TP2 lots", description="0 = automatic (40 % of Lots: 10 -> 4)")
+    trail_after_tp1: bool = Field(
+        True, title="Trail the stop after TP1",
+        description="Once TP1 has sold, the spot stop-loss of the remaining lots follows the best price since "
+                    "entry, `Trail distance` × ATR behind it (it only ever tightens). Chosen from a 41-day study: "
+                    "about 3× the average result of keeping the original stop")
+    trail_atr_mult: float = Field(1.5, ge=0.25, le=10, title="Trail distance (× ATR)",
+                                  description="ATR(14) of the 5-minute candles; 1.5-2.0 tested best")
     rsi_exit: float = Field(70, gt=0, lt=100, title="RSI exit level when TP is off (long)",
                             description="Short trades use 100 − this (70 -> 30)")
     rsi_exit_on: Literal["tick", "candle_close"] = Field(
@@ -154,6 +164,8 @@ class Setup:
     trade_id: str | None = None
     tp_done: list[str] = field(default_factory=list)
     exit_requested: bool = False
+    best: float | None = None  # best spot price since entry (high for CE, low for PE)
+    trail_stop: float | None = None  # current trailed stop, once moved
 
     @property
     def slot_id(self) -> str:
@@ -175,7 +187,7 @@ class Setup:
         return {"no": self.no, "time": fmt_hm(self.candle_start), "direction": self.direction,
                 "conf_high": self.conf_high, "conf_low": self.conf_low, "trigger": self.trigger, "stop": self.stop,
                 "valid_until": fmt_hm(self.valid_until), "state": self.state, "result": self.result,
-                "trade_id": self.trade_id, "tp_done": list(self.tp_done)}
+                "trade_id": self.trade_id, "tp_done": list(self.tp_done), "trail_stop": self.trail_stop}
 
 
 class Indicators:
@@ -438,6 +450,24 @@ class EmaRsiBreakout(Strategy):
                        setup=a.no, reason=reason)
             await self.ctx.request_exit(a.trade_id, reason)  # type: ignore[arg-type]
 
+    def _trail(self, a: Setup, price: float) -> None:
+        """After TP1: keep the stop `trail_atr_mult` × ATR behind the best price since entry (only tightens)."""
+        s = self.settings
+        if a.trade_id is None or a.exit_requested:
+            return
+        is_long = a.direction == "CE_BUY"
+        a.best = price if a.best is None else (max(a.best, price) if is_long else min(a.best, price))
+        atr = self.ind.values["atr"]
+        if not (s.tp_enabled and s.trail_after_tp1 and "tp1" in a.tp_done and atr):
+            return
+        level = round(a.best - atr * s.trail_atr_mult if is_long else a.best + atr * s.trail_atr_mult, 2)
+        current = a.trail_stop if a.trail_stop is not None else a.stop
+        # move only when it tightens by at least half a point (no order or event per tick)
+        if (level >= current + TRAIL_MIN_STEP) if is_long else (level <= current - TRAIL_MIN_STEP):
+            a.trail_stop = level
+            self.ctx.tighten_stop(a.trade_id, level)
+            self._persist()
+
     def _target_lots(self, label: str) -> int:
         a, b = self.settings.split()
         return a if label == "tp1" else b
@@ -456,6 +486,7 @@ class EmaRsiBreakout(Strategy):
                 rsi = self.ind.rsi.peek(tick.ltp)
                 if rsi is not None and await self._rsi_exits(a, rsi, "live"):
                     self._persist()
+            self._trail(a, tick.ltp)
             return
         if a.state != "PENDING":
             return
@@ -502,7 +533,7 @@ class EmaRsiBreakout(Strategy):
         if info is None:
             a.state, a.result = "REJECTED", "signal_rejected"
         else:
-            a.trade_id = info.trade_id
+            a.trade_id, a.best = info.trade_id, spot
             a.state = "IN_TRADE" if info.status == "OPEN" else "DONE"
             if info.status != "OPEN":
                 a.result = info.exit_reason or "entry_failed"

@@ -15,7 +15,7 @@ from storage.models import BrokerAccount, StrategyInstance, Trade
 
 router = APIRouter()
 
-SL_REASONS = {"spot_stop_loss", "protective_sl"}
+SL_REASONS = {"spot_stop_loss", "protective_sl", "trailing_stop"}
 TP_REASONS = {"take_profit", "tp1", "tp2"}
 TIME_REASONS = {"timed_exit", "square_off"}
 PERIODS = {"today": 0, "7d": 6, "30d": 29, "90d": 89}

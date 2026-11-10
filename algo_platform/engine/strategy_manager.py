@@ -103,6 +103,9 @@ class InstanceRuntime:
     async def history(self, instrument: Instrument, timeframe_min: int, count: int) -> list[Candle]:
         return await self.p.market.history(instrument, timeframe_min, count)
 
+    def tighten_stop(self, trade_id: str, level: float) -> None:
+        self.p.trades.tighten_stop(trade_id, level, instance_id=self.instance_id)
+
     async def request_exit(self, trade_id: str, reason: str, partial: str | None = None) -> None:
         # runs in the background: the strategy keeps processing ticks while the exit order fills
         asyncio.get_running_loop().create_task(

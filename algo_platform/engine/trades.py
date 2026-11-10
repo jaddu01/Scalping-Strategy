@@ -78,6 +78,7 @@ class LiveTrade:
     # scale-out targets (TP1, TP2): dicts {label, level, side, qty, done, filled, price}
     partials: list[dict[str, Any]] = field(default_factory=list)
     partial_busy: bool = False  # a partial exit order is in flight (position check must wait)
+    sl_reason: str = "spot_stop_loss"  # "trailing_stop" once the strategy has moved the stop
 
     @property
     def option_series(self) -> str:
@@ -369,7 +370,7 @@ class TradeManager:
             exit_at=lt.exit_at, square_off_at=sq, spot_sl=lt.spot_sl, spot_sl_side=lt.spot_sl_side,
             tp_spot_level=lt.tp_spot_level, tp_spot_side=lt.tp_spot_side, tp_premium_level=lt.tp_premium_level,
             last_spot=self.market.ltp(lt.spot_key) if lt.spot_key else None,
-            last_premium=self.market.ltp(lt.option_series), partials=lt.partials))
+            last_premium=self.market.ltp(lt.option_series), partials=lt.partials, sl_reason=lt.sl_reason))
 
 
     async def _place_protective(self, lt: LiveTrade, adapter: Any, sync: BrokerSync, qty: int | None = None) -> None:
@@ -572,6 +573,29 @@ class TradeManager:
                 return True
             finally:
                 lt.partial_busy = False
+
+    def tighten_stop(self, trade_ref: str, level: float, *, instance_id: int | None = None) -> bool:
+        """Move a trade's spot stop-loss closer to the price (trailing stop). It can only tighten: a level
+        that would loosen the stop (lower for CE, higher for PE) is ignored."""
+        lt = next((x for x in self.live.values()
+                   if x.ref == trade_ref and (instance_id is None or x.instance_id == instance_id)), None)
+        if lt is None or lt.status != "OPEN" or lt.spot_sl is None:
+            return False
+        level = round(level, 2)
+        tighter = level > lt.spot_sl if lt.spot_sl_side == "below" else level < lt.spot_sl
+        if not tighter:
+            return False
+        old, lt.spot_sl, lt.sl_reason = lt.spot_sl, level, "trailing_stop"
+        st = self.exits.states.get(lt.id)
+        if st is not None:
+            st.spot_sl, st.sl_reason = level, "trailing_stop"
+        self._save(lt, spot_sl=level)
+        self._save_meta(lt, trailed=True)
+        self._emit(Category.EXIT, "STOP_TRAILED", f"spot SL {old:.2f} -> {level:.2f}", Level.DEBUG, lt=lt,
+                   old=old, new=level)
+        if st is not None:  # the price may already be through the new level
+            self.exits._check(st, self.clock.now())
+        return True
 
     async def exit_by_ref(self, trade_ref: str, reason: str, *, instance_id: int | None = None,
                           partial: str | None = None) -> bool:
@@ -945,7 +969,8 @@ class TradeManager:
             tp_premium_level=row.tp_premium_level, protective_pct=meta.get("protective_sl_pct"),
             protective_sl_order_id=row.protective_sl_order_id, protective_sl_trigger=row.protective_sl_trigger,
             protective_sl_status=row.protective_sl_status, status="OPEN", exit_order_ids=exit_ids,
-            partials=[dict(p) for p in meta.get("partials") or []])
+            partials=[dict(p) for p in meta.get("partials") or []],
+            sl_reason="trailing_stop" if meta.get("trailed") else "spot_stop_loss")
 
     def today_trade_infos(self, instance_id: int) -> list[TradeInfo]:
         today = self.clock.now().date()

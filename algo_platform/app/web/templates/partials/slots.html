@@ -15,7 +15,7 @@
       {% set v = views.get(s.trade_id, {}) if s.trade_id else {} %}
       <tr><td>{{ s.no }}</td><td>{{ s.time }}</td><td>{{ s.direction }}</td>
         <td class="num">{{ s.conf_high|money }}</td><td class="num">{{ s.conf_low|money }}</td>
-        <td class="num">{{ s.trigger|money }}</td><td class="num">{{ s.stop|money }}</td><td>{{ s.valid_until }}</td>
+        <td class="num">{{ s.trigger|money }}</td><td class="num nowrap">{{ s.stop|money }}{% if s.trail_stop %} → <b>{{ s.trail_stop|money }}</b> <span class="small muted">trail</span>{% endif %}</td><td>{{ s.valid_until }}</td>
         <td><span class="badge {{ 'IN_TRADE' if s.state == 'IN_TRADE' else ('RUNNING' if s.state == 'PENDING' else 'grey') }}">{{ s.state }}</span>{% if s.tp_done %} <span class="small muted">{{ s.tp_done|join(', ')|upper }}</span>{% endif %}</td>
         <td class="num">{{ v.entry_spot|money if v else '' }}</td>
         <td class="num">{% if v %}{{ v.exit_spot|money }}{% if v.live %} <span class="small muted">live</span>{% endif %}{% endif %}</td>

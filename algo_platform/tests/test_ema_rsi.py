@@ -425,3 +425,66 @@ async def test_pe_mid_candle_tp_at_live_rsi_32():
     assert ctx.exit_requests == []
     await strat.on_tick(tick(p32))
     assert ctx.exit_requests == [("T1", "tp1", "tp1")]
+
+
+# ---------------------------------------------------------------- trailing stop after TP1
+async def test_trail_starts_only_after_tp1_and_only_tightens():
+    ctx, strat, t, px = await _in_trade()
+    a = strat.setups[0]
+    atr = strat.ind.values["atr"]
+    ctx.clock.set(t + timedelta(minutes=1))
+    p68 = _price_for_rsi(strat, 68)
+    await strat.on_tick(tick(p68 - 0.05))  # new high, but TP1 not reached yet: no trailing
+    assert ctx.stop_updates == []
+    await strat.on_tick(tick(p68))  # TP1 sells; the trail starts from the best price since entry
+    assert ctx.exit_requests == [("T1", "tp1", "tp1")]
+    level = round(p68 - 1.5 * atr, 2)
+    assert ctx.stop_updates == [("T1", level)] and a.trail_stop == level
+    await strat.on_tick(tick(p68 - 5))  # a pullback never loosens the stop
+    await strat.on_tick(tick(p68 + 0.3))  # tightens by < 0.5 point: not sent
+    assert len(ctx.stop_updates) == 1
+    await strat.on_tick(tick(p68 + 4))
+    assert ctx.stop_updates[-1] == ("T1", round(p68 + 4 - 1.5 * atr, 2))
+    assert strat.status()["signals"][0]["trail_stop"] == ctx.stop_updates[-1][1]
+
+
+async def test_trail_pe_and_switch_off():
+    ctx = warm_ctx(+2)
+    strat = await start(ctx)
+    t, px = await rally_until_setup(strat, ctx, step=-6.0)
+    ctx.clock.set(t + timedelta(seconds=40))
+    await strat.on_tick(tick(strat.setups[0].trigger))
+    p32 = _price_for_rsi(strat, 32, up=False)
+    await strat.on_tick(tick(p32))
+    atr = strat.ind.values["atr"]
+    assert ctx.stop_updates == [("T1", round(p32 + 1.5 * atr, 2))]  # PE: above the lowest price
+    ctx2, strat2, t2, _ = await _in_trade(trail_after_tp1=False)
+    await strat2.on_tick(tick(_price_for_rsi(strat2, 68) + 10))
+    assert ctx2.exit_requests and ctx2.stop_updates == []
+
+
+async def test_engine_tighten_stop_only_tightens_and_exits_as_trailing_stop(tmp_path):
+    env = await build_env(tmp_path)
+    try:
+        env.ref_candle("09:45", 23639.20, 23609.20)
+        env.spot(23630.0)
+        env.option_price(23650, "CE", 100.0)
+        await env.at("09:50", 6)
+        await env.at("09:52", 31)
+        env.spot(23660.0)
+        await env.wait_for(lambda: env.platform.trades.live)
+        lt = next(iter(env.platform.trades.live.values()))
+        tm = env.platform.trades
+        assert not tm.tighten_stop(lt.ref, 23600.0)  # lower = looser for a CE: ignored
+        assert tm.tighten_stop(lt.ref, 23640.0) and lt.spot_sl == 23640.0
+        assert tm.exits.states[lt.id].spot_sl == 23640.0
+        with env.db.session() as s:
+            assert s.get(Trade, lt.id).spot_sl == 23640.0
+        env.option_price(23650, "CE", 112.0)
+        env.spot(23639.0)
+        await env.wait_for(lambda: not env.platform.trades.live)
+        with env.db.session() as s:
+            t = s.get(Trade, lt.id)
+        assert t.exit_reason == "trailing_stop" and t.meta.get("trailed") is True
+    finally:
+        await env.platform.stop()
