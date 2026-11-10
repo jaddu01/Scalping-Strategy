@@ -46,7 +46,7 @@ async def test_sensex_signal_uses_bse_index_and_bfo_options():
     assert sig.option.exchange is Exchange.BFO and sig.option.underlying == "SENSEX"
     assert sig.option.strike == 79100.0  # nearest 100
     assert ctx.last_expiry_exchange is Exchange.BFO
-    assert sig.exit_plan.spot_sl == 78980 and sig.exit_plan.exit_at == at("10:00")
+    assert sig.exit_plan.spot_sl == 78980 and sig.exit_plan.exit_at == at("09:59", 58)
 
 
 async def test_sensex_trade_end_to_end(tmp_path):

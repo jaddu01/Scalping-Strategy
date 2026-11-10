@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from brokers.base import (Exchange, InstrumentKey, InstrumentType, Order, OrderRequest, OrderStatus, OrderType,
                           Position, ProductType, Side)
 from brokers.instruments import round_to_tick
-from core.clock import Clock, combine, fmt_hm, format_duration
+from core.clock import Clock, combine, fmt_hm, format_duration, hm_or_hms
 from core.events import Category, EventBus, Level
 from core.settings_schema import GlobalSettings
 from engine.accounts import AccountRuntime, BrokerSync, make_tag, parse_tag
@@ -237,9 +237,7 @@ class TradeManager:
                         exit_at=min(plan.exit_at, sq), status="PENDING_ENTRY",
                         meta={**signal.meta, "protective_sl_pct": plan.protective_sl_pct,
                               "plan_exit_at": plan.exit_at.isoformat(), "tick_size": inst.tick_size,
-                              "partials": [{"label": p.label, "level": p.spot_level, "side": p.side,
-                                            "qty": p.lots * inst.lot_size, "done": False, "filled": 0,
-                                            "price": None} for p in plan.partial_targets],
+                              "partials": [_partial_plan(p, inst.lot_size) for p in plan.partial_targets],
                               "spot_key": plan.underlying and {"underlying": plan.underlying.underlying,
                                                                "exchange": plan.underlying.exchange.value,
                                                                "instrument_type": plan.underlying.instrument_type.value}})
@@ -291,9 +289,10 @@ class TradeManager:
             tp_spot_level=plan.tp_spot_level, tp_spot_side=plan.tp_spot_side,
             tp_premium_level=round(entry_price * (1 + plan.tp_premium_pct / 100), 2) if plan.tp_premium_pct else None,
             protective_pct=plan.protective_sl_pct,
-            partials=[{"label": p.label, "level": p.spot_level, "side": p.side, "qty": p.lots * inst.lot_size,
-                       "done": False, "filled": 0, "price": None} for p in plan.partial_targets])
+            partials=[_partial_plan(p, inst.lot_size, entry_price, inst.tick_size) for p in plan.partial_targets])
         self.live[trade_id] = lt
+        if lt.partials:
+            self._save_meta(lt, partials=lt.partials)  # premium targets now have their level
         self._save(lt, status="OPEN", quantity=filled, open_quantity=filled, entry_price=entry_price,
                    entry_time=lt.entry_time, entry_order_id=placed.order_id, tp_premium_level=lt.tp_premium_level)
         await self._place_protective(lt, adapter, sync)
@@ -301,12 +300,12 @@ class TradeManager:
         self._emit(Category.POSITION, "OPENED",
                    f"symbol={lt.symbol} qty={filled} avg={entry_price:.2f} spot_SL={_f(lt.spot_sl)} "
                    f"protective_sl={lt.protective_sl_order_id or '-'} TP={_f(lt.tp_spot_level or lt.tp_premium_level)} "
-                   f"exit={fmt_hm(lt.exit_at)}", lt=lt, symbol=lt.symbol, quantity=filled, average_price=entry_price,
+                   f"exit={hm_or_hms(lt.exit_at)}", lt=lt, symbol=lt.symbol, quantity=filled, average_price=entry_price,
                    spot_sl=lt.spot_sl, protective_sl_order_id=lt.protective_sl_order_id, tp=lt.tp_spot_level,
                    tp_premium=lt.tp_premium_level, exit_at=lt.exit_at, mode=lt.mode)
         self._emit(Category.STRATEGY, "ENTRY",
                    f"ENTRY {lt.direction} symbol={lt.symbol} strike={signal.option.strike:g} qty={filled} "
-                   f"spot={signal.spot:.2f} spot_SL={_f(lt.spot_sl)} exit={fmt_hm(lt.exit_at)}", lt=lt,
+                   f"spot={signal.spot:.2f} spot_SL={_f(lt.spot_sl)} exit={hm_or_hms(lt.exit_at)}", lt=lt,
                    premium=entry_price, lots=signal.lots)
         return TradeInfo(trade_id=trade_ref, slot_id=signal.slot_id, direction=signal.direction.value, status="OPEN",
                          entry_price=entry_price)
@@ -519,7 +518,7 @@ class TradeManager:
                 self._emit(Category.EXIT, "PARTIAL_TRIGGERED",
                            f"reason={p['label']} level={p['level']:.2f} spot={_f(spot)} premium={_f(premium)} "
                            f"qty={qty} ({qty // max(1, lt.lot_size)} lots) of {lt.open_qty}", lt=lt,
-                           reason=p["label"], level=p["level"], spot=spot, premium=premium, quantity=qty)
+                           reason=p["label"], target_level=p["level"], spot=spot, premium=premium, quantity=qty)
                 try:
                     acc, adapter, sync = self._route(lt)
                 except Exception as exc:
@@ -548,7 +547,7 @@ class TradeManager:
                     if filled:
                         price = self._avg_fill(sync, [placed.order_id]) or (final.average_price if final else None)
                 lt.open_qty = max(0, lt.open_qty - filled)
-                p.update(done=True, filled=filled, price=price)
+                p.update(done=True, filled=filled, price=price, spot=spot)
                 self._save(lt, open_quantity=lt.open_qty)
                 self._save_meta(lt, partials=lt.partials)
                 st = self.exits.states.get(lt.id)
@@ -896,7 +895,7 @@ class TradeManager:
         if lt.protective_pct and (sl is None or sl.status.is_terminal):
             await self._place_protective(lt, adapter, sync)
         self.bus.emit(Category.POSITION, "RESUMED",
-                      f"resumed {lt.symbol} qty={lt.open_qty} avg={lt.entry_price:.2f} exit={fmt_hm(lt.exit_at)}",
+                      f"resumed {lt.symbol} qty={lt.open_qty} avg={lt.entry_price:.2f} exit={hm_or_hms(lt.exit_at)}",
                       Level.WARNING, **kw)
         if row.status == "EXITING":
             await self.exit_trade(lt.id, row.exit_reason or "timed_exit")
@@ -1031,6 +1030,17 @@ class TradeManager:
                 "mismatch": diff is not None and abs(diff) > self.settings().sync.pnl_tolerance,
             })
         return out
+
+
+def _partial_plan(p: Any, lot_size: int, entry_price: float | None = None, tick_size: float = 0.05) -> dict[str, Any]:
+    """A scale-out target as stored on the trade. Premium targets get their level from the entry fill."""
+    if p.premium_pct is not None:
+        level = (round_to_tick(entry_price * (1 + p.premium_pct / 100), tick_size, "up")
+                 if entry_price else None)
+        return {"label": p.label, "basis": "premium", "pct": p.premium_pct, "level": level, "side": "above",
+                "qty": p.lots * lot_size, "done": False, "filled": 0, "price": None, "spot": None}
+    return {"label": p.label, "basis": "spot", "level": p.spot_level, "side": p.side, "qty": p.lots * lot_size,
+            "done": False, "filled": 0, "price": None, "spot": None}
 
 
 def _f(v: float | None) -> str:

@@ -147,3 +147,5 @@ dialog .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top
 /* strategy comparison */
 table.compare tr.best td { background: rgba(34, 197, 94, .06); }
 table.compare tfoot th { border-top: 2px solid var(--border); padding-top: 8px; }
+table.slots tr.legs td { border-top: 0; padding-top: 0; }
+table.slots tfoot th { border-top: 2px solid var(--border); padding-top: 8px; }

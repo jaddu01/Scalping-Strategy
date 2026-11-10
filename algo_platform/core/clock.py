@@ -35,6 +35,11 @@ def fmt_hm(dt: datetime | time) -> str:
     return dt.strftime("%H:%M")
 
 
+def hm_or_hms(dt: datetime | time) -> str:
+    """HH:MM, or HH:MM:SS when the time is not on a whole minute (e.g. a 09:44:58 timed exit)."""
+    return dt.strftime("%H:%M:%S" if dt.second else "%H:%M")
+
+
 def parse_hhmm(value: str) -> time:
     value = value.strip()
     parts = value.split(":")

@@ -42,6 +42,7 @@ class FakeStrategyContext:
         self.spot_ltp: float | None = None
         self.open_position = False
         self.reject_next = False
+        self.day_state: dict[date, dict[str, Any]] = {}
         self.expiries = [DAY, NEXT_TUE]
         self.spot = Instrument(exchange=Exchange.NSE, token="99926000", tradingsymbol="Nifty 50",
                                underlying="NIFTY", instrument_type=InstrumentType.INDEX)
@@ -82,6 +83,14 @@ class FakeStrategyContext:
 
     def square_off_time(self) -> time:
         return time(15, 15)
+
+    def load_day_state(self, day: date) -> dict[str, Any]:
+        return self.day_state.get(day, {})
+
+    def save_day_state(self, day: date, state: dict[str, Any]) -> None:
+        import copy
+
+        self.day_state[day] = copy.deepcopy(state)
 
     def messages(self, event_type: str) -> list[str]:
         return [e["message"] for e in self.events if e["type"] == event_type]

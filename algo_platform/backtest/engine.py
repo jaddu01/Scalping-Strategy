@@ -16,7 +16,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from brokers.base import Candle, Exchange, Instrument, InstrumentKey, InstrumentType, Tick
-from core.clock import IST, FakeClock, combine, floor_to_timeframe, to_ist
+from core.clock import IST, FakeClock, combine, floor_to_timeframe, hm_or_hms, to_ist
 from core.events import Category, Level
 from core.options_math import next_weekly_expiries, option_premium
 from core.settings_schema import Charges
@@ -86,7 +86,7 @@ class SimTrade:
                 "strike": self.strike, "expiry": self.expiry.isoformat(), "lots": self.lots, "qty": self.qty,
                 "signal_time": self.signal_time.strftime("%H:%M:%S"), "entry_spot": round(self.entry_spot, 2),
                 "trigger": self.trigger, "entry_premium": round(self.entry_premium, 2), "spot_sl": self.spot_sl,
-                "exit_at": self.exit_at.strftime("%H:%M"),
+                "exit_at": self.exit_at.strftime("%H:%M:%S" if self.exit_at.second else "%H:%M"),
                 "exit_time": self.exit_time.strftime("%H:%M:%S") if self.exit_time else None,
                 "exit_spot": round(self.exit_spot, 2) if self.exit_spot is not None else None,
                 "exit_premium": round(self.exit_premium, 2) if self.exit_premium is not None else None,
@@ -153,6 +153,12 @@ class BacktestContext:
     def square_off_time(self) -> time:
         return self.cfg.square_off
 
+    def load_day_state(self, day: date) -> dict[str, Any]:
+        return {}  # a backtest never restarts mid-day
+
+    def save_day_state(self, day: date, state: dict[str, Any]) -> None:
+        return None
+
     def premium(self, strike: float, expiry: date, is_call: bool) -> float:
         return option_premium(self.spot_price or strike, strike, expiry, self.now(), self.cfg.iv, is_call)
 
@@ -173,8 +179,11 @@ class BacktestContext:
                        exit_at=min(plan.exit_at, sq), square_off_at=sq, spot_sl=plan.spot_sl,
                        spot_sl_side=plan.spot_sl_side, tp_spot_level=plan.tp_spot_level, tp_spot_side=plan.tp_spot_side,
                        tp_premium_level=round(prem * (1 + plan.tp_premium_pct / 100), 2) if plan.tp_premium_pct else None,
-                       partials=[{"label": p.label, "level": p.spot_level, "side": p.side, "qty": p.lots * self.cfg.lot_size,
-                                  "done": False} for p in plan.partial_targets])
+                       partials=[({"label": p.label, "basis": "premium", "level": round(prem * (1 + p.premium_pct / 100), 2),
+                                   "side": "above", "qty": p.lots * self.cfg.lot_size, "done": False}
+                                  if p.premium_pct is not None else
+                                  {"label": p.label, "basis": "spot", "level": p.spot_level, "side": p.side,
+                                   "qty": p.lots * self.cfg.lot_size, "done": False}) for p in plan.partial_targets])
         trade = SimTrade(trade_id=tid, slot_id=signal.slot_id, day=self.now().date(), direction=signal.direction.value,
                          symbol=symbol, strike=signal.option.strike or 0.0, expiry=signal.option.expiry or self.now().date(),
                          lots=signal.lots, qty=qty, signal_time=self.now(), entry_spot=signal.spot,
@@ -184,7 +193,7 @@ class BacktestContext:
         self.open = trade
         self.trades.append(trade)
         self.emit("ENTRY", f"ENTRY {trade.direction} symbol={symbol} strike={trade.strike:g} qty={qty} "
-                           f"spot={signal.spot:.2f} spot_SL={plan.spot_sl:.2f} exit={st.exit_at:%H:%M}", trade_id=tid)
+                           f"spot={signal.spot:.2f} spot_SL={plan.spot_sl:.2f} exit={hm_or_hms(st.exit_at)}", trade_id=tid)
         return TradeInfo(trade_id=tid, slot_id=signal.slot_id, direction=signal.direction.value, status="OPEN",
                          entry_price=prem)
 
@@ -201,7 +210,7 @@ class BacktestContext:
         out = prem * (1 - self.cfg.slippage_pct / 100)
         if reason is None:
             # same scale-out rule as the live exit manager: TP1, TP2 ... sell part of the position
-            idx = evaluate_partial(t.state, self.spot_price)
+            idx = evaluate_partial(t.state, self.spot_price, prem)
             while idx is not None and t.open_qty > 0:
                 p = t.state.partials[idx]
                 p["done"] = True
@@ -210,7 +219,7 @@ class BacktestContext:
                 t.partial_fills.append({"label": p["label"], "qty": q, "premium": out, "time": self.now()})
                 self.emit("PARTIAL_EXIT", f"{p['label'].upper()} sold qty={q} price={out:.2f} "
                           f"pnl={(out - t.entry_premium) * q:.2f} remaining={t.open_qty}", trade_id=t.trade_id)
-                idx = evaluate_partial(t.state, self.spot_price)
+                idx = evaluate_partial(t.state, self.spot_price, prem)
             if t.open_qty > 0:
                 return
             reason = t.partial_fills[-1]["label"]
@@ -273,9 +282,19 @@ async def run_backtest(cfg: BacktestConfig, candles: list[Candle]) -> dict[str, 
         step = int(round((bars[1].start - bars[0].start).total_seconds() / 60)) if len(bars) > 1 else 1
         step = max(1, step)
         agg: dict[int, dict[datetime, list[Candle]]] = {tf: {} for tf in tf_list}
+
+        async def due_exit(until: datetime) -> None:
+            # a timed exit due before the clock moves to `until` (e.g. 09:44:58) fires at its exact second,
+            # at the last price seen, as the live 250 ms exit timer does
+            if ctx.open is not None and clock.now() < ctx.open.state.exit_at <= until:
+                clock.set(ctx.open.state.exit_at)
+                await ctx.check_exit()
+
         for bar in bars:
             for off, price, anchor in _walk(bar, cfg.path_step_points):
-                clock.set(bar.start + timedelta(seconds=off * step))
+                t_next = bar.start + timedelta(seconds=off * step)
+                await due_exit(t_next)
+                clock.set(t_next)
                 if anchor:
                     await strat.on_timer(clock.now())
                 ctx.spot_price = price
@@ -287,6 +306,7 @@ async def run_backtest(cfg: BacktestConfig, candles: list[Candle]) -> dict[str, 
                 agg[tf].setdefault(b, []).append(bar)
                 if bar.start + timedelta(minutes=step) >= b + timedelta(minutes=tf):
                     grp = agg[tf][b]
+                    await due_exit(b + timedelta(minutes=tf))
                     clock.set(b + timedelta(minutes=tf))
                     await strat.on_candle(ctx.spot, Candle(start=b, timeframe_min=tf, open=grp[0].open,
                                                        high=max(x.high for x in grp), low=min(x.low for x in grp),

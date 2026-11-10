@@ -16,11 +16,11 @@ from tests.engine_harness import build_env
 
 # (reference start, reference close, hard exit) — columns E, F, H of "strategy part 1.xlsx"
 SHEET_SCHEDULE = [
-    ("09:30", "09:35", "09:45"), ("09:45", "09:50", "10:00"), ("10:00", "10:05", "10:15"),
-    ("10:30", "10:35", "10:45"), ("11:00", "11:05", "11:15"), ("11:30", "11:35", "11:45"),
-    ("11:55", "12:00", "12:10"), ("12:30", "12:35", "12:45"), ("13:00", "13:05", "13:15"),
-    ("13:30", "13:35", "13:45"), ("13:55", "14:00", "14:10"), ("14:20", "14:25", "14:35"),
-    ("14:55", "15:00", "15:10"),
+    ("09:30", "09:35", "09:44:58"), ("09:45", "09:50", "09:59:58"), ("10:00", "10:05", "10:14:58"),
+    ("10:30", "10:35", "10:44:58"), ("11:00", "11:05", "11:14:58"), ("11:30", "11:35", "11:44:58"),
+    ("11:55", "12:00", "12:09:58"), ("12:30", "12:35", "12:44:58"), ("13:00", "13:05", "13:14:58"),
+    ("13:30", "13:35", "13:44:58"), ("13:55", "14:00", "14:09:58"), ("14:20", "14:25", "14:34:58"),
+    ("14:55", "15:00", "15:09:58"),
 ]
 
 
@@ -63,10 +63,10 @@ def test_defaults_match_sheet():
     assert s.entry_window_candles == 2
     assert s.candle_timeframe_min == 5
     slots = build_slots(s, DAY)
-    got = [(x.ref_start.strftime("%H:%M"), x.ref_end.strftime("%H:%M"), x.exit_at.strftime("%H:%M")) for x in slots]
+    got = [(x.ref_start.strftime("%H:%M"), x.ref_end.strftime("%H:%M"), x.exit_at.strftime("%H:%M:%S")) for x in slots]
     assert got == SHEET_SCHEDULE
-    # entry window = the two 5-min candles after the reference candle, never past the hard exit
-    assert slots[0].entry_deadline.strftime("%H:%M") == "09:45"
+    # entry window = the two 5-min candles after the reference candle, closing with the timed exit
+    assert slots[0].entry_deadline.strftime("%H:%M:%S") == "09:44:58"
 
 
 def test_inherited_validation_still_applies():
@@ -102,7 +102,7 @@ async def test_first_slot_ce_entry_10_lots():
     assert sig.direction is Direction.CE_BUY and sig.lots == 10
     assert sig.option.strike == 23650 and sig.option.instrument_type is InstrumentType.CE
     assert sig.exit_plan.spot_sl == 23610.0 and sig.exit_plan.spot_sl_side == "below"
-    assert sig.exit_plan.exit_at == at("09:45")
+    assert sig.exit_plan.exit_at == at("09:44", 58)
 
 
 async def test_pe_entry_sl_is_ref_high():
@@ -114,7 +114,7 @@ async def test_pe_entry_sl_is_ref_high():
     sig = ctx.signals[0]
     assert sig.direction is Direction.PE_BUY
     assert sig.exit_plan.spot_sl == 23640.0 and sig.exit_plan.spot_sl_side == "above"
-    assert sig.exit_plan.exit_at == at("15:10")
+    assert sig.exit_plan.exit_at == at("15:09", 58)
 
 
 async def test_no_entry_after_window():

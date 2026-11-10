@@ -4,16 +4,39 @@
   <p class="muted">{{ rt.message or 'No slots scheduled.' }}</p>
 {% else %}
   {% if rt.strategy.pending_settings %}<div class="flash ok small">New parameters are queued and will apply from the next slot.</div>{% endif %}
-  <table>
-    <thead><tr><th>#</th><th>Reference</th><th>Entry window</th><th>Exit</th><th>State</th><th class="num">Ref high</th><th class="num">Ref low</th><th class="num">Long trigger</th><th class="num">Short trigger</th><th>Direction</th><th>Trade</th><th>Result</th></tr></thead>
+  <table class="slots">
+    <thead><tr><th>#</th><th>Ref window</th><th>Entry window</th><th>Exit</th><th>State</th>
+      <th class="num">Ref high</th><th class="num">Ref low</th><th class="num">Long trigger</th><th class="num">Short trigger</th>
+      <th>Dir</th><th class="num" title="NIFTY spot at the entry signal">Entry</th><th class="num" title="NIFTY spot at the exit">Exit spot</th>
+      <th class="num" title="NIFTY points in the trade's favour (CE: exit − entry, PE: entry − exit); lot-weighted when TP1/TP2 sold part early">Points</th>
+      <th class="num" title="option premium: entry fill → exit (average of all exits)">Premium</th><th class="num">P&amp;L</th>
+      <th>Trade</th><th>Result</th></tr></thead>
     <tbody>
     {% for s in rt.strategy.slots %}
-      <tr><td>{{ s.no }}</td><td>{{ s.ref_start }}–{{ s.ref_end }}</td><td>{{ s.ref_end }}–{{ s.entry_end }}</td><td>{{ s.exit_at }}</td>
+      {% set v = views.get(s.trade_id, {}) if s.trade_id else {} %}
+      <tr><td>{{ s.no }}</td><td class="nowrap">{{ s.ref_start }}–{{ s.ref_end }}</td><td class="nowrap">{{ s.ref_end }}–{{ s.entry_end }}</td><td class="nowrap">{{ s.exit_at }}</td>
         <td><span class="badge {{ 'IN_TRADE' if s.state == 'IN_TRADE' else ('RUNNING' if s.state in ('WATCHING', 'AWAITING_CANDLE') else ('STOPPED' if s.state in ('MISSED',) else ('WAITING' if s.state == 'PENDING' else 'grey'))) }}">{{ s.state }}</span></td>
         <td class="num">{{ s.ref_high|money }}</td><td class="num">{{ s.ref_low|money }}</td>
         <td class="num">{{ s.long_trigger|money }}</td><td class="num">{{ s.short_trigger|money }}</td>
-        <td>{{ s.direction or '' }}</td><td>{% if s.trade_id %}<a href="/trades/{{ s.trade_id }}">{{ s.trade_id }}</a>{% endif %}</td><td>{{ s.result or '' }}</td></tr>
+        <td>{{ s.direction or '' }}</td>
+        <td class="num">{{ v.entry_spot|money if v else '' }}</td>
+        <td class="num">{% if v %}{{ v.exit_spot|money }}{% if v.live %} <span class="small muted">live</span>{% endif %}{% endif %}</td>
+        <td class="num {{ v.points|pnlc if v else '' }}">{% if v and v.points is not none %}<b>{{ '%+.2f'|format(v.points) }}</b>{% elif v %}–{% endif %}</td>
+        <td class="num nowrap">{% if v %}{{ v.entry_premium|money }} → {{ v.exit_premium|money }}{% endif %}</td>
+        <td class="num {{ v.pnl|pnlc if v else '' }}">{% if v %}{{ v.pnl|money }}{% if v.live %} <span class="small muted">MTM</span>{% endif %}{% endif %}</td>
+        <td>{% if s.trade_id %}<a href="/trades/{{ s.trade_id }}">{{ s.trade_id }}</a>{% endif %}</td>
+        <td class="small">{{ s.result or '' }}{% if v and v.exit_time and not v.live %}<br><span class="muted">{{ v.exit_time|dt('%H:%M:%S') }}</span>{% endif %}</td></tr>
+      {% if v and v.legs %}
+      <tr class="legs"><td></td><td colspan="16" class="small muted">
+        {% for leg in v.legs %}{{ leg.label }} {{ leg.lots }} lot{{ 's' if leg.lots != 1 }} @ spot {{ leg.spot|money }}{% if leg.points is not none %} ({{ '%+.2f'|format(leg.points) }} pts){% endif %}, premium {{ leg.premium|money }}{{ ' · ' if not loop.last }}{% endfor %}
+      </td></tr>
+      {% endif %}
     {% endfor %}
     </tbody>
+    {% if totals and totals.trades %}
+    <tfoot><tr><th colspan="12">Today: {{ totals.trades }} trade{{ 's' if totals.trades != 1 }}</th>
+      <th class="num {{ totals.points|pnlc }}">{{ '%+.2f'|format(totals.points) }}</th><th></th>
+      <th class="num {{ totals.pnl|pnlc }}">{{ totals.pnl|money }}</th><th colspan="2"></th></tr></tfoot>
+    {% endif %}
   </table>
 {% endif %}

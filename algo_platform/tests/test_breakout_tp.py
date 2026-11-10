@@ -32,9 +32,18 @@ def test_templates_registered_and_rules_copied():
         assert (a.lots, a.buffer_points, a.exit_offset_min, a.entry_window_candles) == \
                (b.lots, b.buffer_points, b.exit_offset_min, b.entry_window_candles)
         assert [s.exit_at for s in build_slots(a, DAY)] == [s.exit_at for s in build_slots(b, DAY)]
-    assert (orig_tp.tp1_lots, orig_tp.tp2_lots) == (2, 2)  # 5 lots -> 2 / 2 / 1 runner
-    assert (early_tp.tp1_lots, early_tp.tp2_lots) == (4, 4)  # 10 lots -> 4 / 4 / 2 runners
-    assert orig_tp.tp_basis == "range_multiple" and (orig_tp.tp1_value, orig_tp.tp2_value) == (1.0, 1.25)
+    assert orig_tp.split() == (2, 2)  # 5 lots -> 2 / 2 / 1 runner
+    assert early_tp.split() == (4, 4)  # 10 lots -> 4 / 4 / 2 runners
+    assert orig_tp.tp_basis == "premium_pct" and (orig_tp.tp1_value, orig_tp.tp2_value) == (20.0, 30.0)
+    assert orig_tp.exit_early_sec == 2
+
+
+def test_automatic_lot_split():
+    split = {n: NiftyRefBreakoutTPSettings(lots=n).split() for n in (3, 4, 5, 6, 8, 10, 20)}
+    assert split == {3: (1, 1), 4: (1, 1), 5: (2, 2), 6: (2, 2), 8: (3, 3), 10: (4, 4), 20: (8, 8)}
+    assert NiftyRefBreakoutTPSettings(lots=2).split() == (0, 0)  # too small: no scale-out, all at SL/time
+    ref = make_candle(at("09:45"), 23620, 23640.0, 23610.0, 23620)
+    assert tp_levels(NiftyRefBreakoutTPSettings(lots=2), Direction.CE_BUY, 23645.0, ref) == []
 
 
 def test_settings_validation():
@@ -44,7 +53,9 @@ def test_settings_validation():
         NiftyRefBreakoutTPSettings(tp1_value=1.5, tp2_value=1.0)
     with pytest.raises(ValidationError, match="Take-profit mode"):
         NiftyRefBreakoutTPSettings(take_profit_mode="spot_points", take_profit_value=10)
-    assert NiftyEarlyBreakoutTPSettings(lots=6, tp1_lots=2, tp2_lots=2).lots == 6
+    assert NiftyEarlyBreakoutTPSettings(lots=6, tp1_lots=2, tp2_lots=2).split() == (2, 2)
+    with pytest.raises(ValidationError, match="both"):
+        NiftyRefBreakoutTPSettings(tp1_lots=2, tp2_lots=0)
 
 
 def test_switch_off():
@@ -64,9 +75,17 @@ async def test_switched_off_signal_has_no_targets():
     assert ctx.signals[0].lots == 10 and ctx.signals[0].exit_plan.partial_targets == []
 
 
+def test_tp_levels_premium_default():
+    ref = make_candle(at("09:45"), 23620, 23640.0, 23610.0, 23620)
+    for d in (Direction.CE_BUY, Direction.PE_BUY):  # premium targets are the same for CE and PE: price up
+        got = [(p.label, p.spot_level, p.side, p.lots, p.premium_pct)
+               for p in tp_levels(NiftyRefBreakoutTPSettings(), d, 23645.0, ref)]
+        assert got == [("tp1", None, "above", 2, 20.0), ("tp2", None, "above", 2, 30.0)]
+
+
 def test_tp_levels_range_and_points():
     ref = make_candle(at("09:45"), 23620, 23640.0, 23610.0, 23620)  # range 30
-    s = NiftyRefBreakoutTPSettings()
+    s = NiftyRefBreakoutTPSettings(tp_basis="range_multiple", tp1_value=1.0, tp2_value=1.25)
     ce = tp_levels(s, Direction.CE_BUY, 23645.0, ref)
     assert [(p.label, p.spot_level, p.side, p.lots) for p in ce] == [("tp1", 23675.0, "above", 2),
                                                                      ("tp2", 23682.5, "above", 2)]
@@ -87,9 +106,9 @@ async def test_signal_carries_targets():
     ctx.clock.set(at("09:37"))
     await strat.on_tick(Tick(exchange=Exchange.NSE, token="99926000", ltp=23643.0))
     sig = ctx.signals[0]
-    assert sig.lots == 10 and sig.exit_plan.exit_at == at("09:45") and sig.exit_plan.spot_sl == 23610.0
-    assert [(p.label, p.spot_level, p.lots) for p in sig.exit_plan.partial_targets] == \
-           [("tp1", 23673.0, 4), ("tp2", 23680.5, 4)]
+    assert sig.lots == 10 and sig.exit_plan.exit_at == at("09:44", 58) and sig.exit_plan.spot_sl == 23610.0
+    assert [(p.label, p.premium_pct, p.lots) for p in sig.exit_plan.partial_targets] == \
+           [("tp1", 20.0, 4), ("tp2", 30.0, 4)]
 
 
 # ---------------------------------------------------------------- live engine
@@ -118,20 +137,22 @@ async def test_scale_out_tp1_tp2_then_timed_exit(tmp_path):
                                                 "params": {"protective_sl_pct": 40}}])
     try:
         lt = await _enter(env)
-        assert lt.entry_qty == 325 and [p["level"] for p in lt.partials] == [23690.0, 23697.5]
+        # premium targets from the entry fill of 100: +20 % and +30 %
+        assert lt.entry_qty == 325 and [p["level"] for p in lt.partials] == [120.0, 130.0]
         assert _sl_qty(env, lt) == 325
-        env.option_price(23650, "CE", 120.0)
-        env.spot(23690.0)  # TP1: 2 lots
+        env.option_price(23650, "CE", 119.95)
+        await env.settle()
+        assert lt.open_qty == 325  # just below +20 %: nothing sold
+        env.option_price(23650, "CE", 120.0)  # TP1: 2 lots
         await env.wait_for(lambda: lt.open_qty == 195 and not lt.partial_busy)
         assert _sl_qty(env, lt) == 195  # broker stop shrunk with the position
-        env.option_price(23650, "CE", 130.0)
-        env.spot(23698.0)  # TP2: 2 more lots
+        env.option_price(23650, "CE", 130.0)  # TP2: 2 more lots
         await env.wait_for(lambda: lt.open_qty == 65 and not lt.partial_busy)
         assert _sl_qty(env, lt) == 65
         await env.settle()
         assert lt.id in env.platform.trades.live  # last lot is still running
         env.option_price(23650, "CE", 110.0)
-        await env.at("10:00", 0)
+        await env.at("09:59", 58)  # timed exit: reference start + 15 min - 2 s
         await env.wait_for(lambda: not env.platform.trades.live)
         with env.db.session() as s:
             t = s.get(Trade, lt.id)
@@ -139,6 +160,8 @@ async def test_scale_out_tp1_tp2_then_timed_exit(tmp_path):
         assert t.gross_pnl == pytest.approx(20 * 130 + 30 * 130 + 10 * 65)
         assert [(p["label"], p["filled"], p["price"]) for p in t.meta["partials"]] == [("tp1", 130, 120.0),
                                                                                          ("tp2", 130, 130.0)]
+        assert all(p["spot"] == 23660.0 for p in t.meta["partials"])  # spot when each TP sold
+        assert t.exit_time.strftime("%H:%M:%S") == "09:59:58"
         assert len(env.messages("PARTIAL_EXIT")) == 2
         assert "partials=tp1:130@120.00,tp2:130@130.00" in env.messages("EXIT")[-1]
         assert not env.types("PARTIAL_MANUAL_EXIT") and not env.types("EXIT_FAILED")
@@ -160,6 +183,21 @@ async def test_spot_sl_after_tp1_closes_the_rest(tmp_path):
             t = s.get(Trade, lt.id)
         assert t.exit_reason == "spot_stop_loss"
         assert t.gross_pnl == pytest.approx(20 * 130 - 20 * 195)
+    finally:
+        await env.platform.stop()
+
+
+async def test_spot_range_basis_still_available(tmp_path):
+    env = await build_env(tmp_path, instances=[{"name": "TP", "template": "nifty_ref_breakout_tp", "params": {
+        "tp_basis": "range_multiple", "tp1_value": 1.0, "tp2_value": 1.25}}])
+    try:
+        lt = await _enter(env)
+        assert [p["level"] for p in lt.partials] == [23690.0, 23697.5]  # spot: entry 23660 + 1.0x / 1.25x range 30
+        env.option_price(23650, "CE", 150.0)  # premium +50 % does not matter on the spot basis
+        await env.settle()
+        assert lt.open_qty == 325
+        env.spot(23690.0)
+        await env.wait_for(lambda: lt.open_qty == 195 and not lt.partial_busy)
     finally:
         await env.platform.stop()
 
@@ -201,7 +239,9 @@ def _day_with_breakout() -> list[Candle]:
 
 
 async def test_backtest_scales_out_like_live():
-    cfg = BacktestConfig(template_id="nifty_ref_breakout_tp", params={"reference_candle_starts": "09:45"},
+    cfg = BacktestConfig(template_id="nifty_ref_breakout_tp",
+                         params={"reference_candle_starts": "09:45", "tp_basis": "range_multiple",
+                                 "tp1_value": 1.0, "tp2_value": 1.25},
                          day_from=BT_DAY, day_to=BT_DAY, slippage_pct=0)
     res = await run_backtest(cfg, _day_with_breakout())
     tr = res["trades"][0]
@@ -215,3 +255,51 @@ async def test_backtest_scales_out_like_live():
     # same entry; P&L differs only because 4 of 5 lots were sold earlier
     assert p["entry_premium"] == tr["entry_premium"]
     assert tr["gross"] != p["gross"]
+
+
+async def test_backtest_premium_targets():
+    cfg = BacktestConfig(template_id="nifty_ref_breakout_tp", params={"reference_candle_starts": "09:45"},
+                         day_from=BT_DAY, day_to=BT_DAY, slippage_pct=0, iv=0.13)
+    res = await run_backtest(cfg, _day_with_breakout())
+    tr = res["trades"][0]
+    assert tr["exit_time"] == "09:59:58"
+    for leg in filter(None, tr["partials"].split(", ")):
+        label, rest = leg.split(":")
+        price = float(rest.split("@")[1])
+        need = 1.2 if label == "tp1" else 1.3
+        assert price >= tr["entry_premium"] * need - 0.01  # sold only once the modelled premium was up 20 / 30 %
+
+
+async def test_slots_route_shows_trade_points_and_tp_legs(tmp_path):
+    """The strategy page's slots table, fed from the real engine: open trade (live MTM), then closed."""
+    import httpx
+    from fastapi import FastAPI
+
+    from app.auth.deps import current_user
+    from app.web import routes_strategies
+
+    env = await build_env(tmp_path, instances=[{"name": "TP", "template": "nifty_ref_breakout_tp"}])
+    try:
+        app = FastAPI()
+        app.state.platform, app.state.db = env.platform, env.db
+        app.include_router(routes_strategies.router)
+        app.dependency_overrides[current_user] = lambda: None
+        iid = env.instance_ids[0]
+        lt = await _enter(env)
+        env.option_price(23650, "CE", 120.0)  # TP1
+        await env.wait_for(lambda: lt.open_qty == 195 and not lt.partial_busy)
+        env.spot(23670.0)
+        await env.settle()
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            html = (await c.get(f"/strategies/{iid}/slots")).text
+            assert "23,660.00" in html and "23,670.00" in html and "live" in html and "MTM" in html
+            assert "TP1 2 lots @ spot 23,660.00 (+0.00 pts), premium 120.00" in html
+            env.option_price(23650, "CE", 110.0)
+            await env.at("09:59", 58)
+            await env.wait_for(lambda: not env.platform.trades.live)
+            html = (await c.get(f"/strategies/{iid}/slots")).text
+            # entry 23660 -> TP1 2 lots at 23660 (0 pts) + 3 lots out at 23670 (+10) = +6.00 weighted
+            assert "+6.00" in html and "100.00 → 114.00" in html and "Today: 1 trade" in html
+            assert "09:59:58" in html
+    finally:
+        await env.platform.stop()

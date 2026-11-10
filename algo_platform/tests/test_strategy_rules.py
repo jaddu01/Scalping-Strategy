@@ -23,12 +23,13 @@ from strategies.nifty_ref_breakout import (
 )
 from tests.conftest import DAY, NEXT_TUE, FakeStrategyContext, at, make_candle
 
+# (reference start, reference close, timed exit = start + 15 min - 2 s)
 EXPECTED_SCHEDULE = [
-    ("09:45", "09:50", "10:00"), ("10:00", "10:05", "10:15"), ("10:15", "10:20", "10:30"),
-    ("10:45", "10:50", "11:00"), ("11:15", "11:20", "11:30"), ("11:45", "11:50", "12:00"),
-    ("12:10", "12:15", "12:25"), ("12:45", "12:50", "13:00"), ("13:15", "13:20", "13:30"),
-    ("13:45", "13:50", "14:00"), ("14:10", "14:15", "14:25"), ("14:35", "14:40", "14:50"),
-    ("14:55", "15:00", "15:10"),
+    ("09:45", "09:50", "09:59:58"), ("10:00", "10:05", "10:14:58"), ("10:15", "10:20", "10:29:58"),
+    ("10:45", "10:50", "10:59:58"), ("11:15", "11:20", "11:29:58"), ("11:45", "11:50", "11:59:58"),
+    ("12:10", "12:15", "12:24:58"), ("12:45", "12:50", "12:59:58"), ("13:15", "13:20", "13:29:58"),
+    ("13:45", "13:50", "13:59:58"), ("14:10", "14:15", "14:24:58"), ("14:35", "14:40", "14:49:58"),
+    ("14:55", "15:00", "15:09:58"),
 ]
 
 
@@ -69,7 +70,7 @@ def test_defaults_match_spec():
 # ---------------------------------------------------------------- bug 3 + bug 2: fixed schedule, exit = start + 15
 def test_fixed_slot_schedule_and_exit_times():
     slots = build_slots(NiftyRefBreakoutSettings(), DAY)
-    got = [(s.ref_start.strftime("%H:%M"), s.ref_end.strftime("%H:%M"), s.exit_at.strftime("%H:%M")) for s in slots]
+    got = [(s.ref_start.strftime("%H:%M"), s.ref_end.strftime("%H:%M"), s.exit_at.strftime("%H:%M:%S")) for s in slots]
     assert got == EXPECTED_SCHEDULE
     assert [s.no for s in slots] == list(range(1, 14))
     # entry window = reference close -> reference close + 10 minutes
@@ -78,10 +79,17 @@ def test_fixed_slot_schedule_and_exit_times():
 
 def test_exit_is_start_plus_15_not_20():
     s = build_slots(NiftyRefBreakoutSettings(), DAY)
-    by_start = {x.ref_start.strftime("%H:%M"): x.exit_at.strftime("%H:%M") for x in s}
-    assert by_start["09:45"] == "10:00"
-    assert by_start["12:10"] == "12:25"
-    assert by_start["10:45"] == "11:00"  # the old build exited at 10:50
+    by_start = {x.ref_start.strftime("%H:%M"): x.exit_at.strftime("%H:%M:%S") for x in s}
+    assert by_start["09:45"] == "09:59:58"  # start + 15 min - 2 s
+    assert by_start["12:10"] == "12:24:58"
+    assert by_start["10:45"] == "10:59:58"  # the old build exited at 10:50
+    # the next reference candle is still on the fixed schedule
+    assert [x.ref_start.strftime("%H:%M") for x in s][:2] == ["09:45", "10:00"]
+    # entry window closes with the timed exit
+    assert s[0].entry_deadline == s[0].exit_at
+    no_early = {x.ref_start.strftime("%H:%M"): x.exit_at.strftime("%H:%M:%S")
+                for x in build_slots(NiftyRefBreakoutSettings(exit_early_sec=0), DAY)}
+    assert no_early["09:45"] == "10:00:00"
 
 
 async def test_reference_candles_come_only_from_the_schedule(fake_ctx):
@@ -137,7 +145,7 @@ async def test_signal_is_ce_buy_with_atm_strike_and_5_lots(fake_ctx):
     assert sig.option.expiry == DAY  # nearest non-expired weekly (expiry day itself counts)
     assert sig.lots == 5
     assert sig.exit_plan.spot_sl == 23609.20 and sig.exit_plan.spot_sl_side == "below"
-    assert sig.exit_plan.exit_at == at("10:00")
+    assert sig.exit_plan.exit_at == at("09:59", 58)
     assert sig.trigger == 23641.45
     assert slot.state is SlotState.IN_TRADE
 
@@ -151,7 +159,7 @@ async def test_signal_is_pe_buy_below_low_minus_buffer(fake_ctx):
     assert sig.direction is Direction.PE_BUY
     assert sig.option.instrument_type is InstrumentType.PE
     assert sig.exit_plan.spot_sl == 23670.95 and sig.exit_plan.spot_sl_side == "above"
-    assert sig.exit_plan.exit_at == at("11:00")
+    assert sig.exit_plan.exit_at == at("10:59", 58)
 
 
 def test_atm_strike_rounding():
@@ -251,7 +259,7 @@ async def test_ref_log_format(fake_ctx):
     await open_window(fake_ctx, strat, "09:45", 23639.20, 23609.20)
     msg = fake_ctx.messages("REF_CANDLE")[0]
     assert msg.startswith("REF slot=#1 candle=09:45 high=23639.20 low=23609.20 "
-                          "long_trigger=23641.45 short_trigger=23606.95 exit=10:00")
+                          "long_trigger=23641.45 short_trigger=23606.95 exit=09:59:58")
 
 
 async def test_window_opens_only_after_finalization_delay(fake_ctx):
@@ -279,7 +287,7 @@ async def test_candle_close_trigger(fake_ctx):
     fake_ctx.clock.set(at("10:00", 5))
     await strat.on_candle(fake_ctx.spot, make_candle(at("09:55"), 101, 110, 100, 108))
     assert fake_ctx.signals[0].direction is Direction.CE_BUY
-    assert fake_ctx.signals[0].exit_plan.exit_at == at("10:05")
+    assert fake_ctx.signals[0].exit_plan.exit_at == at("10:04", 58)
 
 
 async def test_candle_close_ignores_candles_after_the_window(fake_ctx):

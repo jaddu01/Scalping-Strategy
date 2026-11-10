@@ -43,14 +43,14 @@ async def test_full_trade_spot_stop_loss(env):
     assert t.lots == 5 and t.quantity == 5 * 65
     assert t.entry_price == 100.0
     assert t.spot_sl == 23609.20
-    assert t.exit_at.strftime("%H:%M") == "10:00"
+    assert t.exit_at.strftime("%H:%M:%S") == "09:59:58"
     # protective SL-M at 40% below the fill
     await env.wait_for(lambda: env.platform.trades.live[t.id].protective_sl_status == "TRIGGER_PENDING")
     lt = env.platform.trades.live[t.id]
     assert lt.protective_sl_trigger == 60.0
     entry_line = env.messages("ENTRY")[0]
     assert entry_line.startswith("ENTRY CE_BUY symbol=") and "strike=23650 qty=325" in entry_line
-    assert "spot_SL=23609.20 exit=10:00" in entry_line
+    assert "spot_SL=23609.20 exit=09:59:58" in entry_line
     # spot SL: CE exits when spot <= ref_low
     env.option_price(23650, "CE", 80.0)
     env.spot(23609.20)
@@ -75,12 +75,12 @@ async def test_full_trade_spot_stop_loss(env):
     assert len(env.messages("SIGNAL")) == 1
 
 
-async def test_timed_exit_at_start_plus_15(env):
+async def test_timed_exit_at_start_plus_15_minus_2s(env):
     t = await enter_ce(env)
     env.option_price(23650, "CE", 120.0)
-    await env.at("09:59", 59)
+    await env.at("09:59", 57)
     assert env.platform.trades.live
-    await env.at("10:00", 0)
+    await env.at("09:59", 58)
     await env.wait_for(lambda: not env.platform.trades.live)
     with env.db.session() as s:
         t2 = s.get(Trade, t.id)

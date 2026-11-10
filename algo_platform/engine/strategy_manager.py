@@ -100,6 +100,19 @@ class InstanceRuntime:
     def square_off_time(self) -> time:
         return self.p.settings.market.final_square_off
 
+    def _day_state_key(self, day: date) -> str:
+        return f"slots:{self.instance_id}:{day.isoformat()}"
+
+    def load_day_state(self, day: date) -> dict[str, Any]:
+        from storage.repo import load_paper_state
+
+        return load_paper_state(self.p.db, self._day_state_key(day))
+
+    def save_day_state(self, day: date, state: dict[str, Any]) -> None:
+        from storage.repo import save_paper_state
+
+        save_paper_state(self.p.db, self._day_state_key(day), state)
+
     # ------------------------------------------------------------------ inputs
     def _on_tick(self, series: str, tick: Tick) -> None:
         inst = self._series_inst.get(series)

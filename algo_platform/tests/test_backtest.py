@@ -89,7 +89,7 @@ async def test_candle_cache_fetches_only_missing_days(tmp_path):
 
 
 async def test_exit_is_at_the_fixed_time():
-    """No trailing: a winning CE is held to the hard exit (reference start + 15 = 10:00)."""
+    """No trailing: a winning CE is held to the hard exit (reference start + 15 min - 2 s = 09:59:58)."""
     bars = flat_day()
     for i in range(5):
         t = combine(DAY, time(9, 45 + i))
@@ -102,5 +102,5 @@ async def test_exit_is_at_the_fixed_time():
     cfg = BacktestConfig(template_id="nifty_ref_breakout", params={}, day_from=DAY, day_to=DAY)
     res = await run_backtest(cfg, list(bars.values()))
     t = res["trades"][0]
-    assert t["exit_reason"] == "timed_exit" and t["exit_time"] == "10:00:00"
+    assert t["exit_reason"] == "timed_exit" and t["exit_time"] == "09:59:58"
     assert t["spot_sl"] == 23590.0

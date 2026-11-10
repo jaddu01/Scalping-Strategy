@@ -182,7 +182,7 @@ async def test_backtest_replays_strategy_rules():
     assert len(trades) == 1
     t = trades[0]
     assert t["direction"] == "CE_BUY" and t["trigger"] == 103.25 and t["spot_sl"] == 99.0
-    assert t["exit_reason"] == "timed_exit" and t["exit_at"] == "10:00" and t["exit_time"].startswith("10:00")
+    assert t["exit_reason"] == "timed_exit" and t["exit_at"] == "09:59:58" and t["exit_time"] == "09:59:58"
     assert t["qty"] == 5 * 65
     assert res["summary"]["trades"] == 1 and res["summary"]["win_rate"] in (0.0, 100.0)
 

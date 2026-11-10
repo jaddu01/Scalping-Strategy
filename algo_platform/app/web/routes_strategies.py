@@ -266,5 +266,35 @@ async def instance_slots(iid: int, request: Request, user: SessionInfo = Depends
     """HTMX partial: today's slots, refreshed every few seconds."""
     p = request.app.state.platform
     rt = p.strategies.runtimes.get(iid) if p else None
-    return render(request, "partials/slots.html", {"rt": rt.snapshot() if rt else None})
+    snap = rt.snapshot() if rt else None
+    views: dict[str, dict[str, Any]] = {}
+    totals = {"points": 0.0, "pnl": 0.0, "trades": 0}
+    refs = [s["trade_id"] for s in ((snap or {}).get("strategy") or {}).get("slots", []) if s.get("trade_id")]
+    if refs:
+        from app.web.slot_view import slot_trade_view
+
+        with request.app.state.db.session() as s:
+            rows = {t.trade_ref: t for t in s.scalars(select(Trade).where(Trade.trade_ref.in_(refs)))}
+            data = {ref: {"direction": t.direction, "signal_spot": t.signal_spot, "quantity": t.quantity,
+                          "lot_size": t.lot_size, "entry_price": t.entry_price, "exit_price": t.exit_price,
+                          "exit_trigger_spot": t.exit_trigger_spot, "gross_pnl": t.gross_pnl, "net_pnl": t.net_pnl,
+                          "status": t.status, "exit_time": t.exit_time, "partials": (t.meta or {}).get("partials")}
+                    for ref, t in rows.items()}
+        live_by_ref = {lt.ref: lt for lt in list(p.trades.live.values())} if p else {}
+        for ref, tr in data.items():
+            lt = live_by_ref.get(ref)
+            live = None
+            if lt is not None:
+                live = {"spot": p.market.ltp(lt.spot_key) if lt.spot_key else None,
+                        "premium": p.market.ltp(lt.option_series), "open_qty": lt.open_qty}
+                tr = {**tr, "partials": lt.partials, "status": lt.status}
+            v = slot_trade_view(tr, live)
+            views[ref] = v
+            if v.get("points") is not None:
+                totals["points"] += v["points"]
+            if v.get("pnl") is not None:
+                totals["pnl"] += v["pnl"]
+            totals["trades"] += 1
+    totals = {k: round(v, 2) if isinstance(v, float) else v for k, v in totals.items()}
+    return render(request, "partials/slots.html", {"rt": snap, "views": views, "totals": totals})
 

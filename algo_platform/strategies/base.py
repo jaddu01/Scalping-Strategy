@@ -46,9 +46,12 @@ class PartialTarget:
     """Sell `lots` of the position when spot reaches `spot_level` (e.g. TP1, TP2). The rest stays open."""
 
     label: str  # "tp1", "tp2" — also the exit reason if this target closes the last lots
-    spot_level: float
+    spot_level: float | None
     side: str  # "above": hit when spot >= level (CE); "below": hit when spot <= level (PE)
     lots: int
+    # premium target instead of a spot level: hit when the option's price >= entry fill × (1 + pct/100).
+    # The level is set by the engine once the entry fill price is known.
+    premium_pct: float | None = None
 
 
 @dataclass
@@ -120,6 +123,12 @@ class StrategyContext(Protocol):
     def has_open_position(self) -> bool: ...
 
     def square_off_time(self) -> time: ...
+
+    def load_day_state(self, day: date) -> dict[str, Any]:
+        """Strategy state saved earlier today (empty if none), so a restart can rebuild the day."""
+        ...
+
+    def save_day_state(self, day: date, state: dict[str, Any]) -> None: ...
 
 
 class Strategy(abc.ABC):

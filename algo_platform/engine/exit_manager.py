@@ -73,14 +73,17 @@ def evaluate_exit(st: ExitState, spot: float | None, premium: float | None, now:
     return None
 
 
-def evaluate_partial(st: ExitState, spot: float | None) -> int | None:
-    """Index of the first scale-out target (TP1, TP2, ...) that spot has reached and that is not done yet."""
-    if spot is None:
-        return None
+def evaluate_partial(st: ExitState, spot: float | None, premium: float | None = None) -> int | None:
+    """Index of the first scale-out target (TP1, TP2, ...) that has been reached and is not done yet.
+    Spot targets compare NIFTY spot with the level; premium targets compare the option's price."""
     for i, p in enumerate(st.partials):
-        if p.get("done"):
+        if p.get("done") or p.get("level") is None:
             continue
-        if (p["side"] == "above" and spot >= p["level"]) or (p["side"] == "below" and spot <= p["level"]):
+        if p.get("basis") == "premium":
+            if premium is not None and premium >= p["level"]:
+                return i
+        elif spot is not None and ((p["side"] == "above" and spot >= p["level"])
+                                   or (p["side"] == "below" and spot <= p["level"])):
             return i
     return None
 
@@ -129,13 +132,13 @@ class ExitManager:
         reason = evaluate_exit(st, st.last_spot, st.last_premium, now)
         if reason is None:
             # full exits (spot SL, timed exit) win over a target hit on the same tick
-            idx = evaluate_partial(st, st.last_spot)
+            idx = evaluate_partial(st, st.last_spot, st.last_premium)
             while idx is not None:
                 st.partials[idx]["done"] = True
                 asyncio.get_running_loop().create_task(
                     self.trades.exit_partial(st.trade_db_id, idx, spot=st.last_spot, premium=st.last_premium),
                     name=f"partial-{st.trade_ref}-{st.partials[idx]['label']}")
-                idx = evaluate_partial(st, st.last_spot)
+                idx = evaluate_partial(st, st.last_spot, st.last_premium)
             return
         st.triggered = True
         asyncio.get_running_loop().create_task(
