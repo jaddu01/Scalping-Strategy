@@ -46,3 +46,25 @@
 {% endmacro %}
 
 {% macro csrf() %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endmacro %}
+
+{% macro owner_select(owners, value, error=None) %}
+  {% if owners %}
+  <div class="field {{ 'has-error' if error }}"><label>Owner (partner)</label>
+    <select name="owner_user_id">{% for uid, name in owners %}<option value="{{ uid }}" {{ 'selected' if value == uid }}>{{ name }}</option>{% endfor %}</select>
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    <div class="help">Only this partner (or an admin) can change or start it.</div></div>
+  {% endif %}
+{% endmacro %}
+
+{% macro owner_filter(owners, value, extra=None) %}
+  <form method="get" class="row inline-form">
+    {% for k, v in (extra or {}).items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+    <label class="small muted">Partner</label>
+    <select name="owner">
+      <option value="all" {{ 'selected' if value == 'all' }}>All partners</option>
+      <option value="me" {{ 'selected' if value == 'me' }}>Mine</option>
+      {% for uid, name in owners %}<option value="{{ uid }}" {{ 'selected' if value == uid|string }}>{{ name }}</option>{% endfor %}
+    </select>
+    <button class="small" type="submit">Show</button>
+  </form>
+{% endmacro %}

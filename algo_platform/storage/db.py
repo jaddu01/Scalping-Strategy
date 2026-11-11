@@ -40,7 +40,34 @@ class Database:
         cfg.set_main_option("script_location", str(MIGRATIONS_DIR))
         cfg.set_main_option("sqlalchemy.url", self.url.replace("%", "%%"))
         cfg.attributes["connection_engine"] = self.engine
+        self._backup_before_upgrade(cfg)
         command.upgrade(cfg, "head")
+
+    def _backup_before_upgrade(self, cfg) -> None:  # type: ignore[no-untyped-def]
+        """Copy a file-based SQLite database to backups/ before a pending schema upgrade runs."""
+        if not self.url.startswith("sqlite:///") or self.url.endswith(":memory:"):
+            return
+        from alembic.runtime.migration import MigrationContext
+        from alembic.script import ScriptDirectory
+
+        head = ScriptDirectory.from_config(cfg).get_current_head()
+        with self.engine.connect() as conn:
+            current = MigrationContext.configure(conn).get_current_revision()
+        if current is None or current == head:
+            return  # new database, or nothing to do
+        import sqlite3
+        from datetime import datetime
+
+        path = Path(self.url[len("sqlite:///"):])
+        dest_dir = path.parent / "backups"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"pre-upgrade-{current}-to-{head}-{datetime.now():%Y%m%d-%H%M%S}.db"
+        src, dst = sqlite3.connect(str(path)), sqlite3.connect(str(dest))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+            src.close()
 
     @contextlib.contextmanager
     def session(self) -> Iterator[Session]:

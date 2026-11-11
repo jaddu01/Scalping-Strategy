@@ -18,6 +18,7 @@
     <div class="fields">
       <div class="field {{ 'has-error' if errors.label }}"><label>Label *</label><input type="text" name="label" value="{{ values.label }}" required>
         {% if errors.label %}<div class="error">{{ errors.label }}</div>{% endif %}<div class="help">e.g. “Angel A/c 1”</div></div>
+      {{ m.owner_select(owners, values.owner_user_id, errors.owner_user_id) }}
       <div class="field"><label class="inline"><input type="checkbox" name="enabled" {{ 'checked' if values.enabled }}> Enabled (log in at startup)</label></div>
       <div class="field"><label class="inline"><input type="checkbox" name="auto_relogin" {{ 'checked' if values.auto_relogin }}> Daily automatic re-login before market open</label></div>
     </div>

@@ -11,6 +11,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy import or_, select
 
+from app.auth.access import account_for_control, instance_for_control, require_trader
 from app.auth.deps import SessionInfo, audit, current_user, require_admin
 from core.clock import combine
 from storage.models import EventRecord, StrategyInstance, Trade
@@ -38,8 +39,9 @@ async def instance_detail(instance_id: int, request: Request, user: SessionInfo 
 
 @router.post("/instances/{instance_id}/enable")
 async def enable_instance(instance_id: int, request: Request, payload: dict[str, Any] = Body(default={}),
-                          user: SessionInfo = Depends(require_admin)) -> dict[str, Any]:
+                          user: SessionInfo = Depends(require_trader)) -> dict[str, Any]:
     p = _platform(request)
+    instance_for_control(request, user, instance_id)
     with request.app.state.db.session() as s:
         row = s.get(StrategyInstance, instance_id)
         if row is None:
@@ -56,8 +58,9 @@ async def enable_instance(instance_id: int, request: Request, payload: dict[str,
 
 @router.post("/instances/{instance_id}/disable")
 async def disable_instance(instance_id: int, request: Request, payload: dict[str, Any] = Body(default={}),
-                           user: SessionInfo = Depends(require_admin)) -> dict[str, Any]:
+                           user: SessionInfo = Depends(require_trader)) -> dict[str, Any]:
     p = _platform(request)
+    instance_for_control(request, user, instance_id)
     choice = payload.get("on_open_position")
     open_pos = p.trades.open_trade_count(instance_id=instance_id) > 0
     if open_pos and choice not in ("exit_now", "finish_trade"):
@@ -71,22 +74,25 @@ async def disable_instance(instance_id: int, request: Request, payload: dict[str
 
 
 @router.post("/instances/{instance_id}/kill")
-async def kill_instance(instance_id: int, request: Request, user: SessionInfo = Depends(require_admin)) -> dict[str, Any]:
+async def kill_instance(instance_id: int, request: Request, user: SessionInfo = Depends(require_trader)) -> dict[str, Any]:
     p = _platform(request)
+    instance_for_control(request, user, instance_id)
     await p.strategies.kill(instance_id, user.username)
     audit(request, user, "kill_switch_instance", str(instance_id))
     return {"ok": True}
 
 
 @router.post("/accounts/{account_id}/kill")
-async def kill_account(account_id: int, request: Request, user: SessionInfo = Depends(require_admin)) -> dict[str, Any]:
+async def kill_account(account_id: int, request: Request, user: SessionInfo = Depends(require_trader)) -> dict[str, Any]:
+    account_for_control(request, user, account_id)
     res = await _platform(request).kill_account(account_id, user.username)
     audit(request, user, "kill_switch_account", str(account_id), res)
     return {"ok": True, **res}
 
 
 @router.post("/accounts/{account_id}/kill/reset")
-async def reset_account_kill(account_id: int, request: Request, user: SessionInfo = Depends(require_admin)) -> dict[str, Any]:
+async def reset_account_kill(account_id: int, request: Request, user: SessionInfo = Depends(require_trader)) -> dict[str, Any]:
+    account_for_control(request, user, account_id)
     await _platform(request).reset_kill(user.username, account_id)
     audit(request, user, "kill_switch_reset_account", str(account_id))
     return {"ok": True}

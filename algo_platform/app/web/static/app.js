@@ -5,6 +5,8 @@
   const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
   const csrf = () => ($('meta[name="csrf-token"]') || {}).content || "";
   const isAdmin = () => document.body.dataset.admin === "1";
+  // admins control everything; a partner controls only what they own (the server checks this too)
+  const canControl = (ownerId) => isAdmin() || (document.body.dataset.trader === "1" && ownerId != null && String(ownerId) === document.body.dataset.uid);
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const num = (v, d = 2) => (v === null || v === undefined || v === "" || isNaN(v)) ? "–" : Number(v).toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d });
   const pc = (v) => (v > 0 ? "pos" : v < 0 ? "neg" : "");
@@ -140,13 +142,13 @@
     $("#gk-state").innerHTML = s.global_kill ? `<span class="badge red">ACTIVE</span> ${isAdmin() ? '<button class="small" data-kill="reset">Reset</button>' : ""}` : `<span class="badge green">off</span>`;
     // instances
     $("#inst-body").innerHTML = (s.instances || []).map((i) => `<tr>
-      <td>${isAdmin() ? `<label class="switch"><input type="checkbox" class="inst-toggle" data-id="${i.id}" data-mode="${esc(i.mode)}" data-name="${esc(i.name)}" ${i.enabled ? "checked" : ""}><span></span></label>` : (i.enabled ? "on" : "off")}</td>
+      <td>${canControl(i.owner_id) ? `<label class="switch"><input type="checkbox" class="inst-toggle" data-id="${i.id}" data-mode="${esc(i.mode)}" data-name="${esc(i.name)}" ${i.enabled ? "checked" : ""}><span></span></label>` : (i.enabled ? "on" : "off")}</td>
       <td><a href="/strategies/${i.id}">${esc(i.name)}</a>${i.pending_settings ? ' <span class="badge amber" title="new parameters apply from the next slot">pending params</span>' : ""}</td>
       <td><span class="badge ${esc(i.status)}">${esc(i.status === "RUNNING" ? "RUNNING" : i.status)}</span> <span class="muted small">${esc(i.message || "")}</span></td>
       <td><span class="badge ${esc(i.mode)}">${esc(i.mode.toUpperCase())}</span></td>
-      <td>${esc(i.account)}</td><td class="num">${i.trades}</td>
+      <td>${esc(i.owner || "-")}</td><td>${esc(i.account)}</td><td class="num">${i.trades}</td>
       <td class="num ${pc(i.gross)}">${num(i.gross)}</td><td class="num ${pc(i.net)}">${num(i.net)}</td>
-      <td>${isAdmin() && i.enabled ? `<button class="small danger" data-kill="instance" data-id="${i.id}" data-name="${esc(i.name)}">Kill</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="9" class="muted">No strategy instances yet — <a href="/strategies/new">create one</a>.</td></tr>`;
+      <td>${canControl(i.owner_id) && i.enabled ? `<button class="small danger" data-kill="instance" data-id="${i.id}" data-name="${esc(i.name)}">Kill</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="10" class="muted">No strategy instances yet — <a href="/strategies/new">create one</a>.</td></tr>`;
     // positions
     $("#pos-body").innerHTML = (s.positions || []).map((p) => `<tr data-exit="${esc(p.exit_at)}">
       <td><a href="/trades/${esc(p.trade_ref)}">${esc(p.trade_ref)}</a><div class="muted small">${esc(p.instance_name)}</div></td>
@@ -166,9 +168,9 @@
     $("#ext-body").innerHTML = ext.map((p) => `<tr><td><span class="badge ext">External / manual</span></td><td>${esc(p.account)}${p.paper ? " (paper)" : ""}</td><td>${esc(p.symbol)}</td><td class="num">${p.qty}</td><td class="num">${num(p.avg)}</td><td class="num">${num(p.ltp)}</td><td class="num ${pc(p.pnl)}">${num(p.pnl)}</td></tr>`).join("");
     $("#acc-body").innerHTML = (s.accounts || []).map((a) => `<tr><td><span class="dot ${esc(a.indicator)}"></span></td>
       <td><a href="/accounts">${esc(a.label)}</a>${a.is_feed ? ' <span class="badge paper">data feed</span>' : ""}${a.kill_switch ? ' <span class="badge red">KILLED</span>' : ""}</td>
-      <td>${esc(a.status)}</td><td class="num">${num(a.funds)}</td>
+      <td>${esc(a.owner || "-")}</td><td>${esc(a.status)}</td><td class="num">${num(a.funds)}</td>
       <td class="num ${pc((a.pnl || {}).gross)}">${num((a.pnl || {}).gross)}</td><td class="num ${pc((a.pnl || {}).net)}">${num((a.pnl || {}).net)}</td>
-      <td class="small">${a.is_feed ? "tick " + esc(ago(a.last_tick_at)) + "<br>" : ""}sync ${esc(ago(a.last_order_sync_at))}</td></tr>`).join("") || `<tr><td colspan="7" class="muted">No broker accounts — <a href="/accounts">add one</a>.</td></tr>`;
+      <td class="small">${a.is_feed ? "tick " + esc(ago(a.last_tick_at)) + "<br>" : ""}sync ${esc(ago(a.last_order_sync_at))}</td></tr>`).join("") || `<tr><td colspan="8" class="muted">No broker accounts — <a href="/accounts">add one</a>.</td></tr>`;
   }
   function applyState(s) {
     lastState = s; stateAt = Date.now();

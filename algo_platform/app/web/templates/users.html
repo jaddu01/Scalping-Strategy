@@ -2,7 +2,9 @@
 {% import "macros.html" as m with context %}
 {% block title %}Users{% endblock %}
 {% block content %}
-<h1>Users</h1>
+<h1>Users &amp; partners</h1>
+<p class="muted small">A <b>trader</b> (partner) adds their own broker account and strategies, and can start, stop, edit and kill only those.
+Everyone sees all strategies, trades and P&amp;L. Broker secrets are never shown to anyone.</p>
 <div class="panel">
 <table><thead><tr><th>User</th><th>Role</th><th>2FA</th><th>Status</th><th>Last login</th><th>Change role</th><th>Reset password</th><th></th></tr></thead>
 <tbody>{% for u in rows %}<tr>
@@ -10,9 +12,11 @@
   <td><span class="badge">{{ u.role }}</span></td><td>{{ 'on' if u.totp_enabled else 'off' }}</td>
   <td>{% if not u.is_active %}<span class="badge grey">inactive</span>{% elif u.locked_until and u.locked_until > now %}<span class="badge red">locked</span>{% else %}<span class="badge green">active</span>{% endif %}</td>
   <td class="small">{{ u.last_login_at|dt }}</td>
-  <td><form method="post" action="/users/{{ u.id }}/role" class="row">{{ m.csrf() }}<select name="role"><option {{ 'selected' if u.role == 'admin' }}>admin</option><option {{ 'selected' if u.role == 'viewer' }}>viewer</option></select><button class="small" type="submit">Set</button></form></td>
+  <td><form method="post" action="/users/{{ u.id }}/role" class="row">{{ m.csrf() }}<select name="role">{% for r in roles %}<option value="{{ r }}" {{ 'selected' if u.role == r }}>{{ r }}</option>{% endfor %}</select><button class="small" type="submit">Set</button></form></td>
   <td><form method="post" action="/users/{{ u.id }}/reset" class="row">{{ m.csrf() }}<input type="password" name="password" placeholder="new password" autocomplete="new-password" required style="max-width:160px"><button class="small" type="submit">Reset</button></form></td>
-  <td><form method="post" action="/users/{{ u.id }}/active" class="inline-form">{{ m.csrf() }}<input type="hidden" name="active" value="{{ '0' if u.is_active else '1' }}"><button class="small {{ 'danger' if u.is_active }}" type="submit">{{ 'Deactivate' if u.is_active else 'Activate' }}</button></form></td>
+  <td><form method="post" action="/users/{{ u.id }}/active" class="inline-form" {% if u.is_active and owned.get(u.id) %}data-confirm="Deactivate {{ u.username }}? Their {{ owned.get(u.id) }} strategies will be stopped." data-danger="1"{% endif %}>{{ m.csrf() }}<input type="hidden" name="active" value="{{ '0' if u.is_active else '1' }}">
+    {% if u.is_active and owned.get(u.id) %}<select name="open_trades" class="small" title="what happens to their open trades"><option value="exit_now" selected>square off open trades</option><option value="finish_trade">let open trades finish</option></select>{% endif %}
+    <button class="small {{ 'danger' if u.is_active }}" type="submit">{{ 'Deactivate' if u.is_active else 'Activate' }}</button></form></td>
 </tr>{% endfor %}</tbody></table>
 </div>
 <div class="panel" style="max-width:560px"><h2 style="margin-top:0">Create user</h2>
@@ -20,7 +24,7 @@
   <div class="fields">
     <div class="field"><label>Username</label><input type="text" name="username" required></div>
     <div class="field"><label>Temporary password</label><input type="password" name="password" autocomplete="new-password" required></div>
-    <div class="field"><label>Role</label><select name="role"><option value="viewer">viewer (read-only)</option><option value="admin">admin (everything)</option></select></div>
+    <div class="field"><label>Role</label><select name="role">{% for r in ['trader', 'viewer', 'admin'] %}<option value="{{ r }}">{{ role_help[r] }}</option>{% endfor %}</select></div>
   </div>
   <div><button class="primary" type="submit">Create</button></div>
 </form></div>

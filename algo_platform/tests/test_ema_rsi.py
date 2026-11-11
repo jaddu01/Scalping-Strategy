@@ -317,6 +317,28 @@ async def test_engine_exit_by_ref_partial_then_full(tmp_path):
         await env.platform.stop()
 
 
+async def test_engine_partial_without_level_sells(tmp_path):
+    """RSI targets (EMA/RSI strategy) have no price level; the TP sell must still go through.
+    Regression: the PARTIAL_TRIGGERED log line crashed on level=None and TP1 was never sold (11 Nov)."""
+    env = await build_env(tmp_path, instances=[{"name": "TP", "template": "nifty_ref_breakout_tp"}])
+    try:
+        env.ref_candle("09:45", 23639.20, 23609.20)
+        env.spot(23630.0)
+        env.option_price(23650, "CE", 100.0)
+        await env.at("09:50", 6)
+        await env.at("09:52", 31)
+        env.spot(23660.0)
+        await env.wait_for(lambda: env.platform.trades.live)
+        lt = next(iter(env.platform.trades.live.values()))
+        for p in lt.partials:
+            p["level"] = None
+        env.option_price(23650, "CE", 110.0)
+        assert await env.platform.trades.exit_by_ref(lt.ref, "tp1", partial="tp1")
+        assert lt.open_qty == 195 and lt.partials[0]["filled"] == 130
+    finally:
+        await env.platform.stop()
+
+
 # ---------------------------------------------------------------- backtest
 def _minutes(day: date, start_px: float, per_min: float) -> list[Candle]:
     out, px, t = [], start_px, combine(day, time(9, 15))
@@ -497,6 +519,7 @@ async def test_engine_tighten_stop_only_tightens_and_exits_as_trailing_stop(tmp_
         await env.wait_for(lambda: env.platform.trades.live)
         lt = next(iter(env.platform.trades.live.values()))
         tm = env.platform.trades
+        await env.wait_for(lambda: lt.id in tm.exits.states and lt.status == "OPEN")
         assert not tm.tighten_stop(lt.ref, 23600.0)  # lower = looser for a CE: ignored
         assert tm.tighten_stop(lt.ref, 23640.0) and lt.spot_sl == 23640.0
         assert tm.exits.states[lt.id].spot_sl == 23640.0

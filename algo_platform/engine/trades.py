@@ -517,7 +517,7 @@ class TradeManager:
             lt.partial_busy = True
             try:
                 self._emit(Category.EXIT, "PARTIAL_TRIGGERED",
-                           f"reason={p['label']} level={p['level']:.2f} spot={_f(spot)} premium={_f(premium)} "
+                           f"reason={p['label']} level={_f(p['level'])} spot={_f(spot)} premium={_f(premium)} "
                            f"qty={qty} ({qty // max(1, lt.lot_size)} lots) of {lt.open_qty}", lt=lt,
                            reason=p["label"], target_level=p["level"], spot=spot, premium=premium, quantity=qty)
                 try:

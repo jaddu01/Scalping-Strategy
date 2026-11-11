@@ -108,9 +108,19 @@ class InstanceRuntime:
 
     async def request_exit(self, trade_id: str, reason: str, partial: str | None = None) -> None:
         # runs in the background: the strategy keeps processing ticks while the exit order fills
-        asyncio.get_running_loop().create_task(
+        task = asyncio.get_running_loop().create_task(
             self.p.trades.exit_by_ref(trade_id, reason, instance_id=self.instance_id, partial=partial),
             name=f"strategy-exit-{trade_id}")
+        task.add_done_callback(lambda t: self._exit_task_done(t, trade_id, partial or reason))
+
+    def _exit_task_done(self, task: asyncio.Task[bool], trade_id: str, what: str) -> None:
+        """A crashed exit must not pass silently: the position would stay open with nobody noticing."""
+        if task.cancelled() or task.exception() is None:
+            return
+        exc = task.exception()
+        log.error("strategy exit %s for %s crashed", what, trade_id, exc_info=exc)
+        self.emit("STRATEGY_EXIT_FAILED", f"{what} exit for {trade_id} failed: {exc!r}; the position stays open "
+                  f"with its SL and timed exit", Level.ERROR, Category.ERROR, trade_id=trade_id)
 
     def _day_state_key(self, day: date) -> str:
         return f"slots:{self.instance_id}:{day.isoformat()}"
@@ -347,6 +357,20 @@ class StrategyManager:
                 s.expunge(row)
             return row
 
+    def _owner_problem(self, row: StrategyInstance) -> str | None:
+        """A strategy trades only on its owner's broker account (the web forms enforce this too; this is the
+        last line of defence, e.g. after an account changed hands). Unowned rows (old data, tests) pass."""
+        if row.broker_account_id is None or row.owner_user_id is None:
+            return None
+        from storage.models import BrokerAccount
+
+        with self.p.db.session() as s:
+            acc = s.get(BrokerAccount, row.broker_account_id)
+            owner = acc.owner_user_id if acc is not None else None
+        if owner is not None and owner != row.owner_user_id:
+            return "its broker account belongs to another partner; link one of the owner's own accounts"
+        return None
+
     async def start_enabled(self) -> None:
         from sqlalchemy import select
 
@@ -362,6 +386,14 @@ class StrategyManager:
         old = self.runtimes.get(instance_id)
         if old is not None:
             await old.stop("restarting")
+        problem = self._owner_problem(row)
+        if problem:
+            self.p.bus.emit(Category.STRATEGY, "INSTANCE_ERROR", f"{row.name} not started: {problem}", Level.ERROR,
+                            instance_id=row.id, instance_name=row.name)
+            with self.p.db.session() as s:
+                r = s.get(StrategyInstance, instance_id)
+                r.status, r.status_message = ERROR, problem
+            return None
         try:
             rt = InstanceRuntime(self.p, row)
         except Exception as exc:

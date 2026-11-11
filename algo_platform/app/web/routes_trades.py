@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, Response
 from sqlalchemy import select
 
 from app.api.routes import trade_timeline
+from app.auth.access import owner_choices, owner_filter
 from app.auth.deps import SessionInfo, current_user
 from app.web.render import render
 from storage.models import BrokerAccount, OrderRecord, StrategyInstance, Trade
@@ -19,8 +20,9 @@ from storage.models import BrokerAccount, OrderRecord, StrategyInstance, Trade
 router = APIRouter()
 
 
-def _filters(request: Request) -> dict[str, Any]:
+def _filters(request: Request, user: SessionInfo) -> dict[str, Any]:
     q = request.query_params
+    owner_val, owner_id = owner_filter(request, user)
     today = date.today()
 
     def d(name: str, default: date) -> date:
@@ -33,7 +35,15 @@ def _filters(request: Request) -> dict[str, Any]:
             "instance_id": int(q["instance_id"]) if q.get("instance_id", "").isdigit() else None,
             "account_id": int(q["account_id"]) if q.get("account_id", "").isdigit() else None,
             "symbol": (q.get("symbol") or "").strip().upper(), "status": q.get("status") or "",
-            "mode": q.get("mode") or ""}
+            "mode": q.get("mode") or "", "owner": owner_val, "owner_id": owner_id}
+
+
+def _owner_accounts(request: Request, owner_id: int | None) -> list[int] | None:
+    """A partner's trades are the ones on their broker accounts (that is where the money is)."""
+    if owner_id is None:
+        return None
+    with request.app.state.db.session() as s:
+        return list(s.scalars(select(BrokerAccount.id).where(BrokerAccount.owner_user_id == owner_id)))
 
 
 def _trades(request: Request, f: dict[str, Any]) -> list[Trade]:
@@ -48,6 +58,9 @@ def _trades(request: Request, f: dict[str, Any]) -> list[Trade]:
         stmt = stmt.where(Trade.status == f["status"])
     if f["mode"]:
         stmt = stmt.where(Trade.mode == f["mode"])
+    owned = _owner_accounts(request, f["owner_id"])
+    if owned is not None:
+        stmt = stmt.where(Trade.account_id.in_(owned))
     with request.app.state.db.session() as s:
         rows = list(s.scalars(stmt.order_by(Trade.id.desc()).limit(5000)))
         for r in rows:
@@ -64,7 +77,7 @@ def _lookups(request: Request) -> tuple[dict[int, str], dict[int, str]]:
 
 @router.get("/trades", response_class=HTMLResponse)
 async def trades_page(request: Request, user: SessionInfo = Depends(current_user)) -> HTMLResponse:
-    f = _filters(request)
+    f = _filters(request, user)
     rows = _trades(request, f)
     inst, acc = _lookups(request)
     summary: dict[tuple[date, str], dict[str, float]] = defaultdict(
@@ -84,12 +97,13 @@ async def trades_page(request: Request, user: SessionInfo = Depends(current_user
     totals = {"gross": sum(b["gross"] for _, b in summ), "net": sum(b["net"] for _, b in summ),
               "charges": sum(b["charges"] for _, b in summ), "trades": sum(b["trades"] for _, b in summ)}
     return render(request, "trades.html", {"rows": rows, "f": f, "inst": inst, "acc": acc, "summary": summ,
-                                           "totals": totals, "qs": request.url.query})
+                                           "totals": totals, "qs": request.url.query,
+                                           "owners": owner_choices(request.app.state.db)})
 
 
 @router.get("/trades.csv")
 async def trades_csv(request: Request, user: SessionInfo = Depends(current_user)) -> Response:
-    f = _filters(request)
+    f = _filters(request, user)
     rows = _trades(request, f)
     inst, acc = _lookups(request)
     buf = io.StringIO()
@@ -124,7 +138,7 @@ async def trade_view(trade_ref: str, request: Request, user: SessionInfo = Depen
 
 @router.get("/orders", response_class=HTMLResponse)
 async def orders_page(request: Request, user: SessionInfo = Depends(current_user)) -> HTMLResponse:
-    f = _filters(request)
+    f = _filters(request, user)
     from core.clock import combine
     from datetime import time
 
@@ -136,10 +150,14 @@ async def orders_page(request: Request, user: SessionInfo = Depends(current_user
         stmt = stmt.where(OrderRecord.instance_id == f["instance_id"])
     if f["symbol"]:
         stmt = stmt.where(OrderRecord.tradingsymbol.contains(f["symbol"]))
+    owned = _owner_accounts(request, f["owner_id"])
+    if owned is not None:
+        stmt = stmt.where(OrderRecord.account_id.in_(owned))
     if request.query_params.get("external") == "1":
         stmt = stmt.where(OrderRecord.is_external.is_(True))
     with request.app.state.db.session() as s:
         rows = list(s.scalars(stmt.order_by(OrderRecord.id.desc()).limit(2000)))
     inst, acc = _lookups(request)
     return render(request, "orders.html", {"rows": rows, "f": f, "inst": inst, "acc": acc,
-                                           "external": request.query_params.get("external") == "1"})
+                                           "external": request.query_params.get("external") == "1",
+                                           "owners": owner_choices(request.app.state.db)})

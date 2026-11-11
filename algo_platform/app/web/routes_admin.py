@@ -8,10 +8,11 @@ from fastapi.responses import HTMLResponse, Response
 from sqlalchemy import func, select
 
 from app.auth import security as sec
+from app.auth.access import ROLE_HELP, ROLES
 from app.auth.deps import SessionInfo, audit, current_user, require_admin
 from app.web.render import redirect, render
 from core.clock import combine
-from storage.models import AuditLog, User
+from storage.models import AuditLog, StrategyInstance, User
 
 router = APIRouter()
 
@@ -20,15 +21,20 @@ router = APIRouter()
 async def users_page(request: Request, user: SessionInfo = Depends(require_admin)) -> HTMLResponse:
     with request.app.state.db.session() as s:
         rows = list(s.scalars(select(User).order_by(User.username)))
-    return render(request, "users.html", {"rows": rows, "now": sec.utcnow()})
+        owned: dict[int, int] = {}
+        for i in s.scalars(select(StrategyInstance)):
+            if i.owner_user_id is not None:
+                owned[i.owner_user_id] = owned.get(i.owner_user_id, 0) + 1
+    return render(request, "users.html", {"rows": rows, "now": sec.utcnow(), "roles": ROLES, "role_help": ROLE_HELP,
+                                          "owned": owned})
 
 
 @router.post("/users/new")
 async def create_user(request: Request, username: str = Form(...), password: str = Form(...),
                       role: str = Form("viewer"), user: SessionInfo = Depends(require_admin)) -> Response:
     username = username.strip().lower()
-    if role not in ("admin", "viewer"):
-        return redirect("/users", err="role must be admin or viewer")
+    if role not in ROLES:
+        return redirect("/users", err="role must be admin, trader or viewer")
     if not username or not username.replace("_", "").replace(".", "").isalnum():
         return redirect("/users", err="username: letters, digits, '.' and '_' only")
     problems = sec.password_problems(password, username)
@@ -48,7 +54,7 @@ def _admins(s) -> int:  # type: ignore[no-untyped-def]
 
 @router.post("/users/{uid}/role")
 async def set_role(uid: int, request: Request, role: str = Form(...), user: SessionInfo = Depends(require_admin)) -> Response:
-    if role not in ("admin", "viewer"):
+    if role not in ROLES:
         raise HTTPException(400, "bad role")
     with request.app.state.db.session() as s:
         u = s.get(User, uid)
@@ -83,8 +89,13 @@ async def reset_password(uid: int, request: Request, password: str = Form(...),
 
 
 @router.post("/users/{uid}/active")
-async def set_active(uid: int, request: Request, active: str = Form(...), user: SessionInfo = Depends(require_admin)) -> Response:
+async def set_active(uid: int, request: Request, active: str = Form(...), open_trades: str = Form("exit_now"),
+                     user: SessionInfo = Depends(require_admin)) -> Response:
+    """Deactivating a partner logs them out and stops their strategies. Open trades are squared off now
+    (exit_now, the default) or left to finish on their own SL / target / timed exit (finish_trade)."""
     flag = active == "1"
+    if open_trades not in ("exit_now", "finish_trade"):
+        open_trades = "exit_now"
     with request.app.state.db.session() as s:
         u = s.get(User, uid)
         if u is None:
@@ -97,10 +108,31 @@ async def set_active(uid: int, request: Request, active: str = Form(...), user: 
         if flag:
             u.locked_until, u.failed_attempts = None, 0
         name = u.username
+    stopped: list[str] = []
     if not flag:
         request.app.state.sessions.destroy_user_sessions(uid)
-    audit(request, user, "user_activated" if flag else "user_deactivated", name)
-    return redirect("/users", ok=f"{name} {'activated' if flag else 'deactivated'}")
+        stopped = await _stop_strategies_of(request, uid, user.username, open_trades)
+    audit(request, user, "user_activated" if flag else "user_deactivated", name,
+          {} if flag else {"strategies_stopped": stopped, "open_trades": open_trades})
+    msg = f"{name} {'activated' if flag else 'deactivated'}"
+    if stopped:
+        msg += f"; stopped {len(stopped)} strategies" + (" (open trades squared off)" if open_trades == "exit_now"
+                                                        else " (open trades finish on their own exits)")
+    return redirect("/users", ok=msg)
+
+
+async def _stop_strategies_of(request: Request, uid: int, by: str, open_trades: str) -> list[str]:
+    with request.app.state.db.session() as s:
+        rows = [(i.id, i.name) for i in s.scalars(select(StrategyInstance).where(
+            StrategyInstance.owner_user_id == uid, StrategyInstance.enabled.is_(True)))]
+    p = request.app.state.platform
+    for iid, _ in rows:
+        if p is not None:
+            await p.strategies.disable(iid, by, open_trades)
+        else:
+            with request.app.state.db.session() as s:
+                s.get(StrategyInstance, iid).enabled = False
+    return [n for _, n in rows]
 
 
 @router.get("/audit", response_class=HTMLResponse)

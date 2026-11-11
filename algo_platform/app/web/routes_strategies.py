@@ -8,43 +8,81 @@ from fastapi.responses import HTMLResponse, Response
 from pydantic import ValidationError
 from sqlalchemy import select
 
-from app.auth.deps import SessionInfo, audit, current_user, require_admin
+from app.auth.access import (can_control, instance_for_control, is_admin, owner_choices, owner_filter,
+                             require_trader, resolve_owner, usernames)
+from app.auth.deps import SessionInfo, audit, current_user
 from app.web.forms import build_fields, errors_by_field, parse_form
 from app.web.render import redirect, render
 from core.settings_schema import InstanceRiskLimits
-from storage.models import BrokerAccount, OrderRecord, StrategyInstance, Trade
+from app.web.shared import merged, personal_keys, split_fields
+from storage.models import BrokerAccount, OrderRecord, SharedStrategy, StrategyInstance, Trade
 from storage.repo import diff_dicts
 from strategies.registry import all_templates, get_template
 
 router = APIRouter()
 
 
-def _accounts(request: Request) -> list[dict[str, Any]]:
+def _accounts(request: Request, user: SessionInfo) -> list[dict[str, Any]]:
+    """Accounts a strategy may be linked to: a partner sees only their own; an admin sees all (with owner),
+    and the save is still refused unless the account's owner is the strategy's owner."""
     p = request.app.state.platform
+    names = usernames(request.app.state.db)
     with request.app.state.db.session() as s:
-        rows = list(s.scalars(select(BrokerAccount).order_by(BrokerAccount.label)))
+        stmt = select(BrokerAccount).order_by(BrokerAccount.label)
+        if not is_admin(user):
+            stmt = stmt.where(BrokerAccount.owner_user_id == user.user_id)
+        rows = list(s.scalars(stmt))
     out = []
     for a in rows:
         rt = p.accounts.get(a.id) if p else None
         out.append({"id": a.id, "label": a.label, "broker_type": a.broker_type,
-                    "status": rt.status if rt else a.status, "is_paper": a.broker_type == "paper"})
+                    "status": rt.status if rt else a.status, "is_paper": a.broker_type == "paper",
+                    "owner": names.get(a.owner_user_id or 0, "–") if is_admin(user) else None})
     return out
 
 
-def _form_ctx(request: Request, template_id: str, values: dict[str, Any], errors: dict[str, str] | None = None,
-              general: list[str] | None = None, instance: StrategyInstance | None = None) -> dict[str, Any]:
+def _form_ctx(request: Request, user: SessionInfo, template_id: str, values: dict[str, Any],
+              errors: dict[str, str] | None = None, general: list[str] | None = None,
+              instance: StrategyInstance | None = None, kind: str = "new",
+              shared: SharedStrategy | None = None) -> dict[str, Any]:
+    """kind: new   = a new shared strategy + your run of it (all fields)
+             run   = your run of a shared strategy: account, mode, lots, risk (the rules are read-only)
+             rules = the shared rules only (no account / mode / lots / risk)
+             legacy = a stand-alone instance with its own rules (all fields)"""
     cls = get_template(template_id)
     errors = errors or {}
+    fields = build_fields(cls.settings_model, values.get("params"), errors, "params.")
+    if kind == "run":
+        fields = split_fields(fields, personal=True)
+    elif kind == "rules":
+        fields = split_fields(fields, personal=False)
+    if kind == "rules":
+        action = f"/strategies/shared/{shared.id}/edit"  # type: ignore[union-attr]
+        cancel = f"/strategies/shared/{shared.id}"  # type: ignore[union-attr]
+    elif instance is not None:
+        action, cancel = f"/strategies/{instance.id}/edit", f"/strategies/{instance.id}"
+    elif shared is not None:
+        action, cancel = f"/strategies/shared/{shared.id}/run", f"/strategies/shared/{shared.id}"
+    else:
+        action, cancel = f"/strategies/new?template={template_id}", "/strategies"
+    rules_view = None
+    if kind == "run" and shared is not None:
+        own = set(personal_keys(cls.settings_model))
+        rules_view = {k: v for k, v in cls.settings_model.model_validate(
+            merged(cls.settings_model, shared.params, values.get("params") or {})).model_dump(mode="json").items()
+            if k not in own}
     return {
+        "kind": kind, "shared": shared, "action": action, "cancel": cancel, "rules_view": rules_view,
         "templates_list": [(k, v.display_name) for k, v in all_templates().items() if not k.startswith("test_")],
         "template_id": template_id,
         "template": cls,
-        "param_fields": build_fields(cls.settings_model, values.get("params"), errors, "params."),
+        "param_fields": fields,
         "risk_fields": build_fields(InstanceRiskLimits, values.get("risk_limits"), errors, "risk."),
         "values": values,
         "errors": errors,
         "general_errors": general or [],
-        "accounts": _accounts(request),
+        "accounts": _accounts(request, user),
+        "owners": owner_choices(request.app.state.db) if is_admin(user) else [],
         "instance": instance,
     }
 
@@ -52,31 +90,53 @@ def _form_ctx(request: Request, template_id: str, values: dict[str, Any], errors
 @router.get("/strategies", response_class=HTMLResponse)
 async def list_instances(request: Request, user: SessionInfo = Depends(current_user)) -> HTMLResponse:
     p = request.app.state.platform
+    owner_val, owner_id = owner_filter(request, user)
+    names = usernames(request.app.state.db)
     with request.app.state.db.session() as s:
-        rows = list(s.scalars(select(StrategyInstance).order_by(StrategyInstance.name)))
+        stmt = select(StrategyInstance).order_by(StrategyInstance.name)
+        if owner_id is not None:
+            stmt = stmt.where(StrategyInstance.owner_user_id == owner_id)
+        rows = list(s.scalars(stmt))
         accounts = {a.id: a.label for a in s.scalars(select(BrokerAccount))}
+        shared = list(s.scalars(select(SharedStrategy).order_by(SharedStrategy.name)))
+        for sh in shared:
+            s.expunge(sh)
     items = []
     for r in rows:
         rt = p.strategies.runtimes.get(r.id) if p else None
         items.append({"row": r, "account": accounts.get(r.broker_account_id or 0, "–"),
                       "status": rt.status if rt else r.status,
-                      "open": bool(p and p.trades.open_trade_count(instance_id=r.id))})
-    return render(request, "strategies.html", {"items": items,
+                      "open": bool(p and p.trades.open_trade_count(instance_id=r.id)),
+                      "lots": (r.params or {}).get("lots", "–"),
+                      "owner": names.get(r.owner_user_id or 0, "–"), "can_edit": can_control(user, r.owner_user_id)})
+    by_strategy: dict[int, list[dict[str, Any]]] = {}
+    for it in items:
+        if it["row"].strategy_id is not None:
+            by_strategy.setdefault(it["row"].strategy_id, []).append(it)
+    groups = [{"s": sh, "runs": by_strategy.get(sh.id, []), "rules_by": names.get(sh.created_by or 0, "admin"),
+               "mine": any(it["row"].owner_user_id == user.user_id for it in by_strategy.get(sh.id, [])),
+               "can_edit_rules": can_control(user, sh.created_by)} for sh in shared]
+    known = {sh.id for sh in shared}
+    standalone = [it for it in items if it["row"].strategy_id not in known]
+    return render(request, "strategies.html", {"groups": groups, "standalone": standalone, "owner": owner_val,
+                                               "owners": owner_choices(request.app.state.db),
                                                "templates_list": [(k, v.display_name) for k, v in all_templates().items()
                                                                   if not k.startswith("test_")]})
 
 
 @router.get("/strategies/new", response_class=HTMLResponse)
 async def new_instance(request: Request, template: str = "nifty_ref_breakout",
-                       user: SessionInfo = Depends(require_admin)) -> HTMLResponse:
+                       user: SessionInfo = Depends(require_trader)) -> HTMLResponse:
     cls = get_template(template)
-    values = {"name": "", "mode": "paper", "notes": "", "broker_account_id": None,
+    values = {"name": "", "mode": "paper", "notes": "", "broker_account_id": None, "owner_user_id": user.user_id,
               "params": cls.settings_model().model_dump(), "risk_limits": InstanceRiskLimits().model_dump()}
-    return render(request, "strategy_form.html", _form_ctx(request, template, values))
+    return render(request, "strategy_form.html", _form_ctx(request, user, template, values))
 
 
-async def _parse_instance_form(request: Request, template_id: str) -> tuple[dict[str, Any], dict[str, str], list[str],
-                                                                               Any, Any]:
+async def _parse_instance_form(request: Request, template_id: str, user: SessionInfo,
+                               current_owner: int | None = None, rules: dict[str, Any] | None = None
+                               ) -> tuple[dict[str, Any], dict[str, str], list[str], Any, Any]:
+    """With `rules` (a run of a shared strategy) only the personal params come from the form."""
     form = await request.form()
     cls = get_template(template_id)
     values: dict[str, Any] = {
@@ -84,8 +144,12 @@ async def _parse_instance_form(request: Request, template_id: str) -> tuple[dict
         "mode": form.get("mode") or "paper",
         "notes": form.get("notes") or "",
         "broker_account_id": int(form.get("broker_account_id")) if form.get("broker_account_id") else None,
+        "owner_user_id": resolve_owner(form.get("owner_user_id"), user, request.app.state.db, current_owner),
     }
     raw_params = parse_form(cls.settings_model, form, "params.")
+    if rules is not None:
+        own = {k: raw_params[k] for k in personal_keys(cls.settings_model) if k in raw_params}
+        raw_params = merged(cls.settings_model, rules, own)
     raw_risk = parse_form(InstanceRiskLimits, form, "risk.")
     values["params"], values["risk_limits"] = raw_params, raw_risk
     errors: dict[str, str] = {}
@@ -105,6 +169,14 @@ async def _parse_instance_form(request: Request, template_id: str) -> tuple[dict
         general += g
     if not values["name"]:
         errors["name"] = "required"
+    if values["broker_account_id"]:
+        with request.app.state.db.session() as s:
+            acc = s.get(BrokerAccount, values["broker_account_id"])
+            if acc is None:
+                errors["broker_account_id"] = "account not found"
+            elif acc.owner_user_id != values["owner_user_id"]:
+                # each strategy trades only on its owner's own broker account
+                errors["broker_account_id"] = "this broker account belongs to another partner"
     if values["mode"] not in ("paper", "live"):
         errors["mode"] = "must be paper or live"
     if values["mode"] == "live":
@@ -121,67 +193,88 @@ async def _parse_instance_form(request: Request, template_id: str) -> tuple[dict
 
 @router.post("/strategies/new")
 async def create_instance(request: Request, template: str = "nifty_ref_breakout",
-                          user: SessionInfo = Depends(require_admin)) -> Response:
-    values, errors, general, params, risk = await _parse_instance_form(request, template)
+                          user: SessionInfo = Depends(require_trader)) -> Response:
+    """A new shared strategy (the rules, for everyone) plus the creator's own run of it."""
+    values, errors, general, params, risk = await _parse_instance_form(request, template, user)
     with request.app.state.db.session() as s:
-        if values["name"] and s.scalar(select(StrategyInstance).where(StrategyInstance.name == values["name"])):
-            errors["name"] = "an instance with this name already exists"
+        if values["name"] and (s.scalar(select(StrategyInstance).where(StrategyInstance.name == values["name"]))
+                               or s.scalar(select(SharedStrategy).where(SharedStrategy.name == values["name"]))):
+            errors["name"] = "a strategy with this name already exists"
     if errors or general:
-        return render(request, "strategy_form.html", _form_ctx(request, template, values, errors, general), 400)
+        return render(request, "strategy_form.html", _form_ctx(request, user, template, values, errors, general), 400)
     with request.app.state.db.session() as s:
+        shared = SharedStrategy(name=values["name"], template_id=template, params=params.model_dump(mode="json"),
+                                notes=values["notes"], created_by=user.user_id)
+        s.add(shared)
+        s.flush()
         row = StrategyInstance(name=values["name"], template_id=template, params=params.model_dump(mode="json"),
                                broker_account_id=values["broker_account_id"], mode=values["mode"], enabled=False,
-                               risk_limits=risk.model_dump(mode="json"), notes=values["notes"])
+                               risk_limits=risk.model_dump(mode="json"), notes=values["notes"],
+                               owner_user_id=values["owner_user_id"], strategy_id=shared.id)
         s.add(row)
         s.flush()
         iid = row.id
     audit(request, user, "instance_created", values["name"], {"template": template, "mode": values["mode"],
+                                                               "owner_user_id": values["owner_user_id"],
                                                                "params": params.model_dump(mode="json")})
     return redirect(f"/strategies/{iid}", ok="Instance created (disabled). Enable it from the dashboard or here.")
 
 
 @router.get("/strategies/{iid}/edit", response_class=HTMLResponse)
-async def edit_instance(iid: int, request: Request, user: SessionInfo = Depends(require_admin)) -> HTMLResponse:
-    with request.app.state.db.session() as s:
-        row = s.get(StrategyInstance, iid)
-        if row is None:
-            raise HTTPException(404, "instance not found")
-        s.expunge(row)
+async def edit_instance(iid: int, request: Request, user: SessionInfo = Depends(require_trader)) -> HTMLResponse:
+    row = instance_for_control(request, user, iid)
+    shared = _shared_of(request, row)
     values = {"name": row.name, "mode": row.mode, "notes": row.notes, "broker_account_id": row.broker_account_id,
+              "owner_user_id": row.owner_user_id,
               "params": get_template(row.template_id).settings_model.model_validate(row.params or {}).model_dump(),
               "risk_limits": InstanceRiskLimits.model_validate(row.risk_limits or {}).model_dump()}
-    return render(request, "strategy_form.html", _form_ctx(request, row.template_id, values, instance=row))
+    return render(request, "strategy_form.html", _form_ctx(request, user, row.template_id, values, instance=row,
+                                                           kind="run" if shared else "legacy", shared=shared))
+
+
+def _shared_of(request: Request, row: StrategyInstance) -> SharedStrategy | None:
+    if row.strategy_id is None:
+        return None
+    with request.app.state.db.session() as s:
+        sh = s.get(SharedStrategy, row.strategy_id)
+        if sh is not None:
+            s.expunge(sh)
+        return sh
 
 
 @router.post("/strategies/{iid}/edit")
-async def save_instance(iid: int, request: Request, user: SessionInfo = Depends(require_admin)) -> Response:
+async def save_instance(iid: int, request: Request, user: SessionInfo = Depends(require_trader)) -> Response:
     p = request.app.state.platform
-    with request.app.state.db.session() as s:
-        row = s.get(StrategyInstance, iid)
-        if row is None:
-            raise HTTPException(404, "instance not found")
-        s.expunge(row)
-    values, errors, general, params, risk = await _parse_instance_form(request, row.template_id)
+    row = instance_for_control(request, user, iid)
+    shared = _shared_of(request, row)
+    kind = "run" if shared else "legacy"
+    values, errors, general, params, risk = await _parse_instance_form(request, row.template_id, user, row.owner_user_id,
+                                                                       rules=shared.params if shared else None)
     with request.app.state.db.session() as s:
         dup = s.scalar(select(StrategyInstance).where(StrategyInstance.name == values["name"], StrategyInstance.id != iid))
         if dup:
             errors["name"] = "an instance with this name already exists"
     open_pos = bool(p and p.trades.open_trade_count(instance_id=iid))
-    structural = (values["mode"] != row.mode or values["broker_account_id"] != row.broker_account_id)
+    structural = (values["mode"] != row.mode or values["broker_account_id"] != row.broker_account_id
+                  or values["owner_user_id"] != row.owner_user_id)
     if structural and open_pos:
-        general.append("cannot change mode or broker account while the instance has an open position")
+        general.append("cannot change mode, broker account or owner while the instance has an open position")
     if errors or general:
         return render(request, "strategy_form.html",
-                      _form_ctx(request, row.template_id, values, errors, general, instance=row), 400)
+                      _form_ctx(request, user, row.template_id, values, errors, general, instance=row,
+                                kind=kind, shared=shared), 400)
     new_params = params.model_dump(mode="json")
     changes = diff_dicts({"name": row.name, "mode": row.mode, "broker_account_id": row.broker_account_id,
+                          "owner_user_id": row.owner_user_id,
                           "params": row.params, "risk_limits": row.risk_limits, "notes": row.notes},
                          {"name": values["name"], "mode": values["mode"], "broker_account_id": values["broker_account_id"],
+                          "owner_user_id": values["owner_user_id"],
                           "params": new_params, "risk_limits": risk.model_dump(mode="json"), "notes": values["notes"]})
     with request.app.state.db.session() as s:
         r = s.get(StrategyInstance, iid)
         r.name, r.mode, r.broker_account_id, r.notes = values["name"], values["mode"], values["broker_account_id"], values["notes"]
         r.params, r.risk_limits = new_params, risk.model_dump(mode="json")
+        r.owner_user_id = values["owner_user_id"]
         enabled = r.enabled
     audit(request, user, "instance_updated", values["name"], changes)
     msg = "Saved."
@@ -197,27 +290,38 @@ async def save_instance(iid: int, request: Request, user: SessionInfo = Depends(
 
 
 @router.post("/strategies/{iid}/clone")
-async def clone_instance(iid: int, request: Request, user: SessionInfo = Depends(require_admin)) -> Response:
+async def clone_instance(iid: int, request: Request, user: SessionInfo = Depends(require_trader)) -> Response:
+    """Any partner may copy any strategy (the partners share them). For a shared strategy that means
+    starting their own run of it; a stand-alone instance is copied. The copy belongs to whoever made it
+    and keeps the broker account only if that account is theirs too."""
     with request.app.state.db.session() as s:
         row = s.get(StrategyInstance, iid)
         if row is None:
             raise HTTPException(404, "instance not found")
+        if row.strategy_id is not None:
+            return redirect(f"/strategies/shared/{row.strategy_id}/run")
+        acc = s.get(BrokerAccount, row.broker_account_id) if row.broker_account_id else None
+        keep_acc = row.broker_account_id if acc is not None and acc.owner_user_id == user.user_id else None
         base = f"{row.name} (copy)"
         name, n = base, 2
         while s.scalar(select(StrategyInstance).where(StrategyInstance.name == name)):
             name, n = f"{base} {n}", n + 1
         new = StrategyInstance(name=name, template_id=row.template_id, params=dict(row.params),
-                               broker_account_id=row.broker_account_id, mode="paper", enabled=False,
-                               risk_limits=dict(row.risk_limits), notes=row.notes)
+                               broker_account_id=keep_acc, mode="paper", enabled=False,
+                               risk_limits=dict(row.risk_limits), notes=row.notes, owner_user_id=user.user_id)
         s.add(new)
         s.flush()
         nid = new.id
     audit(request, user, "instance_cloned", name, {"from": iid})
-    return redirect(f"/strategies/{nid}/edit", ok="Cloned in paper mode — review and save")
+    msg = "Cloned in paper mode — review and save"
+    if row.broker_account_id and keep_acc is None:
+        msg += " (pick one of your own broker accounts)"
+    return redirect(f"/strategies/{nid}/edit", ok=msg)
 
 
 @router.post("/strategies/{iid}/delete")
-async def delete_instance(iid: int, request: Request, user: SessionInfo = Depends(require_admin)) -> Response:
+async def delete_instance(iid: int, request: Request, user: SessionInfo = Depends(require_trader)) -> Response:
+    instance_for_control(request, user, iid)
     p = request.app.state.platform
     if p is not None and (iid in p.strategies.runtimes or p.trades.open_trade_count(instance_id=iid)):
         return redirect(f"/strategies/{iid}", err="Disable the instance (and close its position) before deleting it")
@@ -258,6 +362,9 @@ async def instance_detail(iid: int, request: Request, user: SessionInfo = Depend
         "risk": InstanceRiskLimits.model_validate(row.risk_limits or {}).model_dump(mode="json"),
         "trades": trades, "orders": orders, "rt": rt.snapshot() if rt else None, "day": day,
         "open_position": bool(p and p.trades.open_trade_count(instance_id=iid)),
+        "owner": usernames(request.app.state.db).get(row.owner_user_id or 0, "–"),
+        "can_edit": can_control(user, row.owner_user_id),
+        "shared": _shared_of(request, row),
     })
 
 

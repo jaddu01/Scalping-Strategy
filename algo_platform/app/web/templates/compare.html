@@ -12,6 +12,9 @@
     </select></div>
   <div class="field"><label>From (custom)</label><input type="date" name="day_from" value="{{ d_from }}"></div>
   <div class="field"><label>To (custom)</label><input type="date" name="day_to" value="{{ d_to }}"></div>
+  <div class="field"><label>Partner</label><select name="owner">
+    <option value="all" {{ 'selected' if owner == 'all' }}>All partners</option><option value="me" {{ 'selected' if owner == 'me' }}>Mine</option>
+    {% for uid, name in owners %}<option value="{{ uid }}" {{ 'selected' if owner == uid|string }}>{{ name }}</option>{% endfor %}</select></div>
   <div class="field"><label>Mode</label><select name="mode"><option value="">all</option>
     <option {{ 'selected' if mode == 'paper' }}>paper</option><option {{ 'selected' if mode == 'live' }}>live</option></select></div>
   <div class="field"><label>Strategies</label><select name="show">
@@ -30,7 +33,7 @@
 <div class="panel">
 <table class="compare">
 <thead><tr>
-  <th>Strategy</th><th>Type</th><th>Mode</th><th>Status</th><th class="num">Lots</th>
+  <th>Strategy</th><th>Owner</th><th>Type</th><th>Mode</th><th>Status</th><th class="num">Lots</th>
   <th class="num">Trades</th><th class="num">Wins</th><th class="num">Losses</th><th class="num">Win %</th>
   <th class="num">Gross</th><th class="num">Charges</th><th class="num">Net</th><th class="num">Avg / trade</th>
   <th class="num">Avg win</th><th class="num">Avg loss</th><th class="num" title="sum of winning trades ÷ sum of losing trades">Profit factor</th>
@@ -43,6 +46,7 @@
 <tr {% if r.id == best_id %}class="best" title="highest net P&amp;L in this period"{% endif %}>
   <td><a href="/strategies/{{ r.id }}">{{ r.name }}</a>{% if r.id == best_id %} <span class="badge green">best</span>{% endif %}
     <div class="small muted">{{ r.broker }}</div></td>
+  <td>{{ r.owner }}</td>
   <td class="small">{{ r.template }}</td>
   <td><span class="badge {{ r.mode }}">{{ r.mode }}</span></td>
   <td><span class="badge {{ r.status }}">{{ r.status }}</span>{% if not r.enabled %} <span class="badge grey">disabled</span>{% endif %}</td>
@@ -61,11 +65,11 @@
   <td class="num {{ r.unrealized|pnlc }}">{% if r.open_qty %}{{ r.unrealized|money }} <span class="small muted">({{ r.open_qty }})</span>{% else %}–{% endif %}</td>
 </tr>
 {% else %}
-<tr><td colspan="22" class="muted">No {{ 'strategies' if show_all else 'active (enabled) strategies' }}{{ ' in ' ~ mode ~ ' mode' if mode }}.</td></tr>
+<tr><td colspan="23" class="muted">No {{ 'strategies' if show_all else 'active (enabled) strategies' }}{{ ' in ' ~ mode ~ ' mode' if mode }}.</td></tr>
 {% endfor %}
 </tbody>
 {% if rows|length > 1 %}
-<tfoot><tr><th colspan="5">Total</th><th class="num">{{ totals.trades }}</th><th class="num">{{ totals.wins }}</th><th colspan="2"></th>
+<tfoot><tr><th colspan="6">Total</th><th class="num">{{ totals.trades }}</th><th class="num">{{ totals.wins }}</th><th colspan="2"></th>
   <th class="num {{ totals.gross|pnlc }}">{{ totals.gross|money }}</th><th class="num">{{ totals.charges|money }}</th>
   <th class="num {{ totals.net|pnlc }}">{{ totals.net|money }}</th><th colspan="9"></th>
   <th class="num {{ totals.unrealized|pnlc }}">{{ totals.unrealized|money if totals.open_qty else '–' }}</th></tr></tfoot>

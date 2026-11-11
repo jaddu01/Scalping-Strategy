@@ -1,43 +1,56 @@
 {% extends "base.html" %}
 {% import "macros.html" as m with context %}
-{% block title %}{{ 'Edit' if instance else 'New' }} instance{% endblock %}
+{% block title %}{% if kind == 'rules' %}Rules: {{ shared.name }}{% elif instance %}Edit {{ instance.name }}{% elif kind == 'run' %}Run {{ shared.name }}{% else %}New strategy{% endif %}{% endblock %}
 {% block content %}
-<h1>{{ ('Edit ' ~ instance.name) if instance else 'New strategy instance' }}</h1>
+<h1>{% if kind == 'rules' %}Shared rules: {{ shared.name }}{% elif instance %}{{ 'My settings: ' if kind == 'run' else 'Edit ' }}{{ instance.name }}{% elif kind == 'run' %}Run “{{ shared.name }}” on my account{% else %}New strategy{% endif %}</h1>
 <p class="muted">{{ template.display_name }} — {{ template.description }}</p>
+{% if kind == 'rules' %}<div class="flash ok">These rules are used by <b>every partner</b> who runs this strategy. Running strategies pick up a change from their next trade slot (never mid-trade). Lots, account, mode and risk limits stay each partner's own.</div>{% endif %}
+{% if kind == 'new' %}<p class="small muted">This creates the shared rules (everyone can run them on their own account) and your own run of it.</p>{% endif %}
 {{ m.general_errors(general_errors) }}
-<form method="post" class="stack" action="{{ ('/strategies/' ~ instance.id ~ '/edit') if instance else ('/strategies/new?template=' ~ template_id) }}">
+<form method="post" class="stack" action="{{ action }}">
   {{ m.csrf() }}
-  <input type="hidden" name="confirm_live" id="confirm-live" value="{{ 'yes' if instance and instance.mode == 'live' else '' }}">
+  {% if kind != 'rules' %}<input type="hidden" name="confirm_live" id="confirm-live" value="{{ 'yes' if instance and instance.mode == 'live' else '' }}">{% endif %}
   <fieldset>
-    <legend>Instance</legend>
+    <legend>{{ 'Strategy' if kind == 'rules' else ('My run' if kind == 'run' else 'Strategy and my run') }}</legend>
     <div class="fields">
       <div class="field {{ 'has-error' if errors.name }}"><label>Name *</label><input type="text" name="name" value="{{ values.name }}" required>
-        {% if errors.name %}<div class="error">{{ errors.name }}</div>{% endif %}<div class="help">e.g. “NIFTY Breakout – Angel A/c 1 – Live”</div></div>
+        {% if errors.name %}<div class="error">{{ errors.name }}</div>{% endif %}<div class="help">{{ 'e.g. “EMA21 + RSI50 Breakout”' if kind in ('rules', 'new') else 'e.g. “EMA21 + RSI50 – Bina – Live”' }}</div></div>
+      {% if kind != 'rules' %}
+      {{ m.owner_select(owners, values.owner_user_id, errors.owner_user_id) }}
       <div class="field {{ 'has-error' if errors.broker_account_id }}"><label>Broker account</label>
         <select name="broker_account_id">
           <option value="">— choose —</option>
-          {% for a in accounts %}<option value="{{ a.id }}" {{ 'selected' if values.broker_account_id == a.id }}>{{ a.label }} · {{ a.broker_type }} · {{ a.status }}</option>{% endfor %}
+          {% for a in accounts %}<option value="{{ a.id }}" {{ 'selected' if values.broker_account_id == a.id }}>{{ a.label }} · {{ a.broker_type }} · {{ a.status }}{% if a.owner %} · owner {{ a.owner }}{% endif %}</option>{% endfor %}
         </select>
         {% if errors.broker_account_id %}<div class="error">{{ errors.broker_account_id }}</div>{% endif %}
-        <div class="help">Orders always go through this account. In paper mode they are simulated on its live prices.</div></div>
+        <div class="help">Orders always go through this account, and it must be your own. In paper mode they are simulated on its live prices.</div></div>
       <div class="field {{ 'has-error' if errors.mode }}"><label>Mode</label>
         <select name="mode" id="mode-select">
           <option value="paper" {{ 'selected' if values.mode == 'paper' }}>Paper (simulated fills)</option>
           <option value="live" {{ 'selected' if values.mode == 'live' }}>LIVE (real orders)</option>
         </select>
         {% if errors.mode %}<div class="error">{{ errors.mode }}</div>{% endif %}</div>
+      {% endif %}
     </div>
     <div class="field" style="margin-top:12px"><label>Notes</label><textarea name="notes" rows="2">{{ values.notes }}</textarea></div>
   </fieldset>
   <fieldset>
-    <legend>Strategy parameters</legend>
+    <legend>{{ 'My lots' if kind == 'run' else ('Rules' if kind == 'rules' else 'Strategy parameters') }}</legend>
     {% if instance %}<p class="small muted">Changes to a running instance apply from the next trade slot, never mid-trade.</p>{% endif %}
     <div class="fields">{% for f in param_fields %}{{ m.field(f) }}{% endfor %}</div>
   </fieldset>
+  {% if kind != 'rules' %}
   <fieldset>
-    <legend>Instance risk limits</legend>
+    <legend>My risk limits</legend>
     <div class="fields">{% for f in risk_fields %}{{ m.field(f) }}{% endfor %}</div>
   </fieldset>
-  <div class="row"><button class="primary" type="submit">Save</button><a class="btn" href="{{ ('/strategies/' ~ instance.id) if instance else '/strategies' }}">Cancel</a></div>
+  {% endif %}
+  <div class="row"><button class="primary" type="submit">Save</button><a class="btn" href="{{ cancel }}">Cancel</a></div>
 </form>
+{% if rules_view %}
+<div class="panel">
+  <div class="row"><h2 style="margin:0">Shared rules (read-only)</h2><div class="spacer"></div><a class="btn small" href="/strategies/shared/{{ shared.id }}">{{ shared.name }}</a></div>
+  <table>{% for k, v in rules_view.items() %}<tr><th>{{ k }}</th><td class="mono">{{ v if v is not iterable or v is string else v|join(', ') }}</td></tr>{% endfor %}</table>
+</div>
+{% endif %}
 {% endblock %}

@@ -41,7 +41,7 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
-    role: Mapped[str] = mapped_column(String(16), default="viewer")  # admin | viewer
+    role: Mapped[str] = mapped_column(String(16), default="viewer")  # admin | trader | viewer
     totp_secret_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
@@ -80,6 +80,23 @@ class BrokerAccount(Base):
     last_login_at: Mapped[datetime | None] = mapped_column(nullable=True)
     funds_available: Mapped[float | None] = mapped_column(Float, nullable=True)
     kill_switch: Mapped[bool] = mapped_column(Boolean, default=False)
+    # the partner whose Angel account this is; only they (or an admin) may change or use it
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)  # users.id
+    created_at: Mapped[datetime] = mapped_column(default=now_ist)
+    updated_at: Mapped[datetime] = mapped_column(default=now_ist, onupdate=now_ist)
+
+
+class SharedStrategy(Base):
+    """A strategy's rules, shared by all partners. Each partner runs it as a StrategyInstance ("run") with
+    their own broker account, lots, mode and risk limits; a run's params = these params + its own lots."""
+    __tablename__ = "shared_strategies"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    template_id: Mapped[str] = mapped_column(String(64))
+    params: Mapped[dict[str, Any]] = mapped_column(default=dict)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    # who may change the rules (besides admins); admin-made strategies: admins only
+    created_by: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)  # users.id
     created_at: Mapped[datetime] = mapped_column(default=now_ist)
     updated_at: Mapped[datetime] = mapped_column(default=now_ist, onupdate=now_ist)
 
@@ -98,6 +115,10 @@ class StrategyInstance(Base):
     status: Mapped[str] = mapped_column(String(16), default="STOPPED")
     status_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     stop_after_trade: Mapped[bool] = mapped_column(Boolean, default=False)
+    # the partner who runs this strategy; it may only trade on a broker account with the same owner
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)  # users.id
+    # the shared strategy this run follows (None: a stand-alone instance with its own rules)
+    strategy_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)  # shared_strategies.id
     created_at: Mapped[datetime] = mapped_column(default=now_ist)
     updated_at: Mapped[datetime] = mapped_column(default=now_ist, onupdate=now_ist)
 

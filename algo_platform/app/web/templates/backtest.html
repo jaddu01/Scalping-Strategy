@@ -33,7 +33,7 @@
   <fieldset><legend>Strategy: {{ template_id }}</legend>
     <div class="fields">{% for f in fields %}{{ m.field(f) }}{% endfor %}</div>
   </fieldset>
-  {% if is_admin %}<div><button class="primary" type="submit">Run backtest</button></div>{% endif %}
+  {% if can_trade %}<div><button class="primary" type="submit">Run backtest</button></div>{% endif %}
 </form>
 </div>
 <div class="panel"><h2 style="margin-top:0">Recorded market data</h2>

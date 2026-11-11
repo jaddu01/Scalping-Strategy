@@ -20,6 +20,10 @@ services:
       ALGO_TRUST_PROXY_HEADERS: "true"
       ALGO_FORWARDED_ALLOW_IPS: "*"
       ALGO_COOKIE_SECURE: "true"
+      # one static IP per Angel client code: partner accounts go out through the IP gateway
+      # (deploy/ip_gateway); accounts on the server's own IP go out directly
+      ALGO_EGRESS_DEFAULT_IP: "65.0.62.220"
+      ALGO_EGRESS_PROXIES: "13.126.29.140=http://172.18.0.1:3129,13.205.116.78=http://172.18.0.1:3130"
     volumes:
       - /opt/algo_platform/data:/app/data
       - /opt/algo_platform/logs:/app/logs

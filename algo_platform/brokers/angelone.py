@@ -108,9 +108,24 @@ class AngelOneCredentials(BrokerCredentials):
                              description="Base32 secret shown when enabling TOTP at smartapi.angelbroking.com/enable-totp",
                              json_schema_extra={"secret": True})
     client_local_ip: str = Field("", title="Local IP (optional)", description="Sent as X-ClientLocalIP")
-    client_public_ip: str = Field("", title="Static public IP (optional)",
-                                  description="The static IP registered with Angel One, sent as X-ClientPublicIP")
+    client_public_ip: str = Field("", title="Static public IP",
+                                  description="The static IP this account is registered with at Angel One. All of "
+                                              "its API calls go out from this IP (each partner has their own); "
+                                              "it is checked before every login.")
     mac_address: str = Field("", title="MAC address (optional)", description="Sent as X-MACAddress")
+
+
+def _ws_proxy(public_ip: str | None) -> dict[str, Any]:
+    """websocket-client arguments that send a socket through the account's IP gateway (if any)."""
+    from urllib.parse import urlparse
+
+    from brokers import egress
+
+    proxy = egress.proxy_for(public_ip)
+    if not proxy:
+        return {}
+    u = urlparse(proxy)
+    return {"http_proxy_host": u.hostname, "http_proxy_port": u.port or 80, "proxy_type": "http"}
 
 
 # --------------------------------------------------------------------------- mapping helpers
@@ -361,7 +376,11 @@ class AngelOneAdapter(BrokerAdapter):
     def _new_api(self) -> Any:
         from SmartApi import SmartConnect  # imported lazily: the SDK writes a logs/ folder on import
 
-        api = SmartConnect(api_key=self.creds.api_key, timeout=10)
+        from brokers import egress
+
+        proxy = egress.proxy_for(self.creds.client_public_ip)
+        api = SmartConnect(api_key=self.creds.api_key, timeout=10,
+                           proxies={"http": proxy, "https": proxy} if proxy else None)
         if self.creds.client_local_ip:
             api.clientLocalIP = api.clientLocalIp = self.creds.client_local_ip
         if self.creds.client_public_ip:
@@ -424,6 +443,7 @@ class AngelOneAdapter(BrokerAdapter):
         async with self._login_lock:
             self._loop = asyncio.get_running_loop()
             await self.limiter.acquire("login")
+            await self._check_egress()
             api = await asyncio.to_thread(self._new_api)
             try:
                 totp = pyotp.TOTP(self.creds.totp_secret.replace(" ", "")).now()
@@ -448,6 +468,27 @@ class AngelOneAdapter(BrokerAdapter):
             return Profile(client_id=str(data.get("clientcode", self.creds.client_id)), name=str(data.get("name", "")),
                            broker=self.broker_type, email=data.get("email"),
                            exchanges=list(data.get("exchanges") or []))
+
+    async def _check_egress(self) -> None:
+        """Refuse to log in unless this account's traffic leaves from its own static IP (see brokers/egress)."""
+        from brokers import egress
+
+        if not egress.enabled():
+            return
+        problem = egress.route_problem(self.creds.client_public_ip)
+        if problem:
+            self._connected = False
+            raise BrokerError(f"IP check: {problem}")
+        want = egress.expected_ip(self.creds.client_public_ip)
+        try:
+            got = await asyncio.to_thread(egress.check_egress, self.creds.client_public_ip)
+        except Exception as exc:
+            self._connected = False
+            raise BrokerError(f"IP check failed (is the IP gateway running?): {exc}", retryable=True) from exc
+        if got != want:
+            self._connected = False
+            raise BrokerError(f"IP check: traffic leaves from {got}, not this account's static IP {want}; "
+                              "not logging in", retryable=True)
 
     async def refresh_session(self) -> None:
         if not self._api or not self._refresh:
@@ -778,7 +819,7 @@ class AngelOneAdapter(BrokerAdapter):
                                             on_message=on_message, on_error=on_error)
                 self._order_ws = ws
                 ws.run_forever(sslopt={"cert_reqs": ssl.CERT_REQUIRED}, ping_interval=10, ping_timeout=8,
-                               ping_payload="ping")
+                               ping_payload="ping", **_ws_proxy(self.creds.client_public_ip))
             except Exception as exc:
                 self._post(self._emit_connection, "orders", "error", str(exc))
             if self._order_stop.is_set():

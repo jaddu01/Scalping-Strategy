@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Res
 from pydantic import ValidationError
 from sqlalchemy import select
 
+from app.auth.access import require_trader
 from app.auth.deps import SessionInfo, audit, current_user, require_admin
 from app.web.forms import build_fields, errors_by_field, parse_form
 from app.web.render import redirect, render
@@ -45,8 +46,16 @@ def _ctx(request: Request, template_id: str, params: Any, errors: dict[str, str]
 
 @router.get("/backtest", response_class=HTMLResponse)
 async def backtest_page(request: Request, template: str = "nifty_ref_breakout", instance_id: int | None = None,
-                        user: SessionInfo = Depends(current_user)) -> HTMLResponse:
+                        strategy_id: int | None = None, user: SessionInfo = Depends(current_user)) -> HTMLResponse:
     params: Any = get_template(template).settings_model()
+    if strategy_id:
+        from storage.models import SharedStrategy
+
+        with request.app.state.db.session() as s:
+            sh = s.get(SharedStrategy, strategy_id)
+            if sh is not None:
+                template = sh.template_id
+                params = get_template(template).settings_model.model_validate(sh.params or {})
     if instance_id:
         with request.app.state.db.session() as s:
             inst = s.get(StrategyInstance, instance_id)
@@ -57,7 +66,7 @@ async def backtest_page(request: Request, template: str = "nifty_ref_breakout", 
 
 
 @router.post("/backtest")
-async def run(request: Request, template: str = "nifty_ref_breakout", user: SessionInfo = Depends(require_admin)) -> Response:
+async def run(request: Request, template: str = "nifty_ref_breakout", user: SessionInfo = Depends(require_trader)) -> Response:
     form = await request.form()
     cls = get_template(template)
     raw = parse_form(cls.settings_model, form, "params.")

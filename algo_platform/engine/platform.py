@@ -34,7 +34,7 @@ from engine.ui_hub import UiHub
 from notify.telegram import TelegramNotifier
 from storage.db import Database
 from storage.event_sink import DbEventSink
-from storage.models import BrokerAccount, StrategyInstance, Trade
+from storage.models import BrokerAccount, StrategyInstance, Trade, User
 from storage.repo import get_secret, holidays, load_global_settings
 
 log = logging.getLogger("algo.platform")
@@ -493,7 +493,10 @@ class Platform:
         stale = self.market.is_stale()
         with self.db.session() as s:
             rows = list(s.scalars(select(StrategyInstance).order_by(StrategyInstance.name)))
-            accounts = {a.id: a.label for a in s.scalars(select(BrokerAccount))}
+            acc_rows = list(s.scalars(select(BrokerAccount)))
+            accounts = {a.id: a.label for a in acc_rows}
+            acc_owner = {a.id: a.owner_user_id for a in acc_rows}
+            names = {u.id: u.username for u in s.scalars(select(User))}
         instances = []
         for r in rows:
             rt = self.strategies.runtimes.get(r.id)
@@ -504,6 +507,7 @@ class Platform:
                 "account": accounts.get(r.broker_account_id or 0, "-"), "trades": b.get("trades", 0),
                 "gross": b.get("gross", 0.0), "net": b.get("net", 0.0),
                 "pending_settings": bool(rt and rt.strategy.has_pending_settings),
+                "owner_id": r.owner_user_id, "owner": names.get(r.owner_user_id or 0, "-"),
             })
         accs = []
         for a in self.accounts.values():
@@ -512,6 +516,8 @@ class Platform:
             d["is_feed"] = self.market.feed_account_id == a.id
             d["last_tick_at"] = self.market.last_tick_at.isoformat() if d["is_feed"] and self.market.last_tick_at else None
             d["pnl"] = summary["accounts"].get(a.id, {})
+            d["owner_id"] = acc_owner.get(a.id)
+            d["owner"] = names.get(acc_owner.get(a.id) or 0, "-")
             accs.append(d)
         return {
             "now": now.isoformat(), "market_open": self.calendar.is_market_open(now),

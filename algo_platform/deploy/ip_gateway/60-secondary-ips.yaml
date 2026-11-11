@@ -1,0 +1,10 @@
+# secondary private IPs of this EC2 instance (their Elastic IPs: see setup.sh); the primary comes via DHCP.
+# /32 on purpose: they stay out of the 172.31.0.0/20 subnet, so the primary stays the default source for
+# everything else (docker NAT picks the first address of that subnet). squid binds to them explicitly.
+network:
+  version: 2
+  ethernets:
+    ens5:
+      addresses:
+        - 172.31.11.102/32
+        - 172.31.0.179/32

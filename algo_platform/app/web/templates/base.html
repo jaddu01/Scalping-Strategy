@@ -9,7 +9,7 @@
   <script src="/static/htmx.min.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
-<body data-user="{{ user.username if user else '' }}" data-admin="{{ '1' if is_admin else '0' }}"
+<body data-user="{{ user.username if user else '' }}" data-admin="{{ '1' if is_admin else '0' }}" data-trader="{{ '1' if can_trade else '0' }}" data-uid="{{ me_id or '' }}"
       data-idle="{{ request.app.state.config.session_idle_minutes if user else 0 }}">
 {% if user %}
 <header class="topbar">

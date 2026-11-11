@@ -82,6 +82,8 @@ def render(request: Request, name: str, ctx: dict[str, Any] | None = None, statu
         "ok": request.query_params.get("ok"),
         "err": request.query_params.get("err"),
         "is_admin": bool(user and user.role == "admin"),
+        "can_trade": bool(user and user.role in ("admin", "trader")),
+        "me_id": user.user_id if user else None,
     }
     base.update(ctx or {})
     return templates.TemplateResponse(request, name, base, status_code=status_code)

@@ -4,6 +4,9 @@
 <div class="row" style="margin-bottom:12px"><h1 style="margin:0">Trades</h1><div class="spacer"></div>
   <a class="btn" href="/orders">Orders →</a><a class="btn" href="/trades.csv?{{ qs }}">Export CSV</a></div>
 <form method="get" class="filters">
+  <div class="field"><label>Partner</label><select name="owner">
+    <option value="all" {{ 'selected' if f.owner == 'all' }}>All partners</option><option value="me" {{ 'selected' if f.owner == 'me' }}>Mine</option>
+    {% for uid, name in owners %}<option value="{{ uid }}" {{ 'selected' if f.owner == uid|string }}>{{ name }}</option>{% endfor %}</select></div>
   <div class="field"><label>From</label><input type="date" name="day_from" value="{{ f.day_from }}"></div>
   <div class="field"><label>To</label><input type="date" name="day_to" value="{{ f.day_to }}"></div>
   <div class="field"><label>Instance</label><select name="instance_id"><option value="">all</option>{% for i, n in inst.items() %}<option value="{{ i }}" {{ 'selected' if f.instance_id == i }}>{{ n }}</option>{% endfor %}</select></div>

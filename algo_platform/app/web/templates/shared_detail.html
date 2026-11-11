@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}{{ sh.name }}{% endblock %}
+{% block content %}
+<div class="row" style="margin-bottom:10px">
+  <h1 style="margin:0">{{ sh.name }}</h1>
+  <span class="badge">shared</span>
+  <div class="spacer"></div>
+  {% if can_run %}<a class="btn {{ '' if mine else 'primary' }}" href="/strategies/shared/{{ sh.id }}/run">Run this strategy</a>
+  <form method="post" action="/strategies/shared/{{ sh.id }}/fork" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" title="a copy of the rules that you can change; the original stays as it is for everyone">Make my own version</button></form>{% endif %}
+  {% if can_edit_rules %}<a class="btn" href="/strategies/shared/{{ sh.id }}/edit">Edit rules</a>
+  {% if not runs %}<form method="post" action="/strategies/shared/{{ sh.id }}/delete" class="inline-form" data-confirm="Delete the strategy {{ sh.name }}?" data-danger="1"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="danger" type="submit">Delete</button></form>{% endif %}{% endif %}
+  <a class="btn" href="/backtest?strategy_id={{ sh.id }}">Backtest</a>
+</div>
+<p class="muted">{{ template.display_name }} · rules by {{ rules_by }}{% if sh.notes %} · {{ sh.notes }}{% endif %}</p>
+
+<div class="panel">
+  <h2 style="margin-top:0">Partners running it</h2>
+  <table>
+    <thead><tr><th>Run</th><th>Partner</th><th>Broker account</th><th class="num">Lots</th><th>Mode</th><th>Enabled</th><th>Status</th><th class="num">Trades today</th><th class="num">Net today</th><th></th></tr></thead>
+    <tbody>
+    {% for it in runs %}
+      <tr>
+        <td><a href="/strategies/{{ it.row.id }}">{{ it.row.name }}</a>{% if it.open %} <span class="badge IN_TRADE">open position</span>{% endif %}</td>
+        <td>{{ it.owner }}</td><td>{{ it.account }}</td><td class="num">{{ it.lots }}</td>
+        <td><span class="badge {{ it.row.mode }}">{{ it.row.mode|upper }}</span></td>
+        <td>{% if it.can_edit %}<label class="switch"><input type="checkbox" class="inst-toggle" data-id="{{ it.row.id }}" data-mode="{{ it.row.mode }}" data-name="{{ it.row.name }}" {{ 'checked' if it.row.enabled }}><span></span></label>{% else %}{{ 'on' if it.row.enabled else 'off' }}{% endif %}</td>
+        <td><span class="badge {{ it.status }}">{{ it.status }}</span></td>
+        <td class="num">{{ it.trades }}</td><td class="num {{ it.net|pnlc }}">{{ it.net|money }}</td>
+        <td>{% if it.can_edit %}<a class="btn small" href="/strategies/{{ it.row.id }}/edit">My settings</a>{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="10" class="muted">Nobody runs this strategy yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="panel">
+  <h2 style="margin-top:0">Rules (same for every partner)</h2>
+  <table>{% for k, v in rules.items() %}<tr><th>{{ k }}</th><td class="mono">{{ v if v is not iterable or v is string else v|join(', ') }}</td></tr>{% endfor %}</table>
+  <p class="small muted">Lots (and the TP1 / TP2 lot split), broker account, paper/live and risk limits are set by each partner on their own run.</p>
+</div>
+{% endblock %}

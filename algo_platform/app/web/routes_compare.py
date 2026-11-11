@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 
+from app.auth.access import owner_choices, owner_filter, usernames
 from app.auth.deps import SessionInfo, current_user
 from app.web.render import render
 from storage.models import BrokerAccount, StrategyInstance, Trade
@@ -51,6 +52,7 @@ class Row:
     tp_hits: int = 0
     open_qty: int = 0
     unrealized: float = 0.0
+    owner: str = "–"
     _curve: list[float] = field(default_factory=list, repr=False)
 
     @property
@@ -150,6 +152,7 @@ async def compare_page(request: Request, user: SessionInfo = Depends(current_use
     period, d_from, d_to = _period(request)
     show_all = request.query_params.get("show") == "all"
     mode = request.query_params.get("mode") or ""
+    owner_val, owner_id = owner_filter(request, user)
     db = request.app.state.db
     with db.session() as s:
         stmt = select(StrategyInstance)
@@ -157,6 +160,8 @@ async def compare_page(request: Request, user: SessionInfo = Depends(current_use
             stmt = stmt.where(StrategyInstance.enabled.is_(True))
         if mode in ("paper", "live"):
             stmt = stmt.where(StrategyInstance.mode == mode)
+        if owner_id is not None:
+            stmt = stmt.where(StrategyInstance.owner_user_id == owner_id)
         instances = list(s.scalars(stmt))
         ids = [i.id for i in instances]
         trades = list(s.scalars(select(Trade).where(Trade.trade_date >= d_from, Trade.trade_date <= d_to,
@@ -175,6 +180,10 @@ async def compare_page(request: Request, user: SessionInfo = Depends(current_use
             q, u = open_pos.get(lt.instance_id, (0, 0.0))
             open_pos[lt.instance_id] = (q + lt.open_qty, u + p.trades.unrealized(lt))
     rows = compare_rows(instances, trades, accounts, status, open_pos)
+    names = usernames(db)
+    owner_of = {i.id: i.owner_user_id for i in instances}
+    for r in rows:
+        r.owner = names.get(owner_of.get(r.id) or 0, "–")
     traded = [r for r in rows if r.trades]
     totals = {"trades": sum(r.trades for r in rows), "gross": round(sum(r.gross for r in rows), 2),
               "charges": round(sum(r.charges for r in rows), 2), "net": round(sum(r.net for r in rows), 2),
@@ -182,4 +191,5 @@ async def compare_page(request: Request, user: SessionInfo = Depends(current_use
               "wins": sum(r.wins for r in rows)}
     best_id = max(traded, key=lambda r: r.net).id if len(traded) > 1 else None
     return render(request, "compare.html", {"rows": rows, "totals": totals, "period": period, "d_from": d_from,
-                                            "d_to": d_to, "show_all": show_all, "mode": mode, "best_id": best_id})
+                                            "d_to": d_to, "show_all": show_all, "mode": mode, "best_id": best_id,
+                                            "owner": owner_val, "owners": owner_choices(db)})

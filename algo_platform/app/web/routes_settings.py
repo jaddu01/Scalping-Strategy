@@ -166,7 +166,9 @@ async def import_yaml(request: Request, file: UploadFile = File(...), user: Sess
             summary["holidays"] = len(data["holidays"])
         created_acc = created_inst = updated_inst = 0
         with db.session() as s:
-            labels = {a.label: a.id for a in s.scalars(select(BrokerAccount))}
+            acc_rows = list(s.scalars(select(BrokerAccount)))
+            labels = {a.label: a.id for a in acc_rows}
+            acc_owner = {a.id: a.owner_user_id for a in acc_rows}
             for a in data.get("broker_accounts", []) or []:
                 if a.get("label") in labels or a.get("broker_type") not in BROKERS:
                     continue
@@ -175,10 +177,12 @@ async def import_yaml(request: Request, file: UploadFile = File(...), user: Sess
                 row = BrokerAccount(broker_type=a["broker_type"], label=a["label"], enabled=False,
                                     auto_relogin=bool(a.get("auto_relogin", True)), risk_limits=a.get("risk_limits") or {},
                                     credentials_enc=get_crypto().encrypt_json(a.get("settings") or {}),
-                                    client_id=str((a.get("settings") or {}).get("client_id", "")))
+                                    client_id=str((a.get("settings") or {}).get("client_id", "")),
+                                    owner_user_id=user.user_id)
                 s.add(row)
                 s.flush()
                 labels[row.label] = row.id
+                acc_owner[row.id] = user.user_id
                 created_acc += 1
             for i in data.get("strategy_instances", []) or []:
                 params = get_template(i["template"]).settings_model.model_validate(i.get("params") or {})
@@ -191,8 +195,21 @@ async def import_yaml(request: Request, file: UploadFile = File(...), user: Sess
                     existing.notes = i.get("notes", "")
                     updated_inst += 1
                 else:
+                    acc_id = labels.get(i.get("broker_account"))
+                    # a strategy belongs to whoever owns its account (so it can only trade there)
+                    owner = acc_owner.get(acc_id) if acc_id else None
+                    from storage.models import SharedStrategy
+
+                    shared = s.scalar(select(SharedStrategy).where(SharedStrategy.name == i["name"]))
+                    if shared is None:  # imported strategies are shared too: rules + this run
+                        shared = SharedStrategy(name=i["name"], template_id=i["template"],
+                                                params=params.model_dump(mode="json"), notes=i.get("notes", ""),
+                                                created_by=user.user_id)
+                        s.add(shared)
+                        s.flush()
                     s.add(StrategyInstance(name=i["name"], template_id=i["template"], mode="paper", enabled=False,
-                                           broker_account_id=labels.get(i.get("broker_account")),
+                                           strategy_id=shared.id if shared.template_id == i["template"] else None,
+                                           broker_account_id=acc_id, owner_user_id=owner or user.user_id,
                                            params=params.model_dump(mode="json"), risk_limits=i.get("risk_limits") or {},
                                            notes=i.get("notes", "")))
                     created_inst += 1
