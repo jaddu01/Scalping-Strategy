@@ -292,3 +292,33 @@ async def test_simulator_is_the_feed_when_no_real_account_exists():
     md = MarketDataService(EventBus(), clock, MarketCalendar(gs), lambda: gs)
     md.candidates = lambda: [FeedCandidate(2, "Paper sim", sim)]
     assert await md.ensure_feed() and md.feed is sim  # demo setups still work
+
+
+async def test_strategy_start_waits_for_instrument_list():
+    """After a restart the feed account's instrument list may still be loading: retry, don't crash."""
+    from types import SimpleNamespace
+
+    import pytest
+
+    from brokers.instruments import InstrumentNotFound
+    from engine.strategy_manager import InstanceRuntime
+
+    calls = {"sub": 0, "start": 0}
+    events, statuses = [], []
+
+    async def subscribe():
+        calls["sub"] += 1
+        if calls["sub"] < 3:
+            raise InstrumentNotFound("no INDEX NIFTY on NSE")
+
+    async def on_start():
+        calls["start"] += 1
+
+    rt = SimpleNamespace(_subscribe_market=subscribe, strategy=SimpleNamespace(on_start=on_start), _stop=False,
+                         emit=lambda *a, **k: events.append(a[0]), _set_status=lambda *a: statuses.append(a))
+    assert await InstanceRuntime._start_strategy(rt, attempts=5, delay=0)
+    assert calls == {"sub": 3, "start": 1} and events == ["WAITING_FOR_INSTRUMENTS"]
+
+    calls["sub"] = -10  # never loads: gives up with the real error after the last attempt
+    with pytest.raises(InstrumentNotFound):
+        await InstanceRuntime._start_strategy(rt, attempts=3, delay=0)

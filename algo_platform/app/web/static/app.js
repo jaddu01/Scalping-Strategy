@@ -21,6 +21,39 @@
   }
   window.algoApi = api;
 
+  // ------------------------------------------------------------------ responsive helpers
+  // the menu button (narrow screens)
+  const setNav = (open) => {
+    document.body.classList.toggle("nav-open", open);
+    $(".nav-toggle")?.setAttribute("aria-expanded", open ? "true" : "false");
+  };
+  document.addEventListener("click", (ev) => {
+    if (ev.target.closest(".nav-toggle")) { setNav(!document.body.classList.contains("nav-open")); return; }
+    if (document.body.classList.contains("nav-open") && !ev.target.closest(".nav")) setNav(false);
+  });
+  document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") setNav(false); });
+  // "cards-sm" tables turn into stacked cards on phones: every cell gets its column's name as a label,
+  // and the column marked th.c-title / th.c-actions / th.c-wide becomes the card's title / buttons / full row
+  function labelTables(root = document) {
+    $$("table.cards-sm", root).forEach((tbl) => {
+      const ths = $$("thead th", tbl);
+      if (!ths.length) return;
+      $$("tbody tr", tbl).forEach((tr) => {
+        let i = 0;
+        Array.from(tr.children).forEach((td) => {
+          const th = ths[i];
+          i += td.colSpan || 1;
+          if (!th || td.colSpan > 1) return;
+          td.dataset.label = th.textContent.trim();
+          ["c-title", "c-actions", "c-wide"].forEach((c) => { if (th.classList.contains(c)) td.classList.add(c); });
+        });
+      });
+    });
+  }
+  window.algoLabelTables = labelTables;
+  document.addEventListener("DOMContentLoaded", () => labelTables());
+  document.addEventListener("htmx:afterSwap", (ev) => labelTables(ev.target));
+
   // ------------------------------------------------------------------ dialogs (no browser alert/confirm)
   function dialog({ title, body, buttons }) {
     return new Promise((resolve) => {
@@ -174,7 +207,7 @@
   }
   function applyState(s) {
     lastState = s; stateAt = Date.now();
-    renderBanners(s); renderConn(s); renderDashboard(s);
+    renderBanners(s); renderConn(s); renderDashboard(s); labelTables($("#dashboard") || document);
     document.dispatchEvent(new CustomEvent("algo:state", { detail: s }));
   }
   // countdowns tick locally between server updates

@@ -2,11 +2,12 @@
 {% block title %}Dashboard{% endblock %}
 {% block content %}
 <div id="dashboard">
-  <div class="row" style="margin-bottom:12px">
-    <h1 style="margin:0">Dashboard</h1>
-    <div class="spacer"></div>
-    <span class="muted">Global kill switch: <span id="gk-state">–</span></span>
-    {% if is_admin %}<button class="danger solid kill" data-kill="global">■ GLOBAL KILL SWITCH</button>{% endif %}
+  <div class="page-head">
+    <h1>Dashboard</h1>
+    <div class="actions">
+      <span class="muted">Global kill switch: <span id="gk-state">–</span></span>
+      {% if is_admin %}<button class="danger solid kill" data-kill="global">■ GLOBAL KILL SWITCH</button>{% endif %}
+    </div>
   </div>
   {% if snap is none %}<div class="flash err">The trading engine is not running (ALGO_DISABLE_ENGINE is set).</div>{% endif %}
   <div class="cards">
@@ -18,32 +19,32 @@
 
   <div class="panel">
     <h2 style="margin-top:0">Strategy instances</h2>
-    <table>
-      <thead><tr><th>On</th><th>Instance</th><th>Status</th><th>Mode</th><th>Owner</th><th>Broker</th><th class="num">Trades</th>
-        <th class="num">Gross P&amp;L</th><th class="num">Net (est.)</th><th></th></tr></thead>
+    <table class="cards-sm">
+      <thead><tr><th>On</th><th class="c-title">Instance</th><th>Status</th><th>Mode</th><th>Owner</th><th>Broker</th><th class="num">Trades</th>
+        <th class="num">Gross P&amp;L</th><th class="num">Net (est.)</th><th class="c-actions"></th></tr></thead>
       <tbody id="inst-body"></tbody>
     </table>
   </div>
 
   <div class="panel">
     <h2 style="margin-top:0">Open positions <span class="muted small">— live from the broker; SL, TP and exit countdown update in real time</span></h2>
-    <table>
-      <thead><tr><th>Trade</th><th>Symbol</th><th class="num">Qty</th><th class="num">Avg</th><th class="num">LTP</th>
+    <table class="cards-sm">
+      <thead><tr><th class="c-title">Trade</th><th>Symbol</th><th class="num">Qty</th><th class="num">Avg</th><th class="num">LTP</th>
         <th class="num">MTM</th><th class="num">Broker P&amp;L</th><th class="num">Spot / spot SL</th><th class="num">SL dist</th>
         <th>Protective SL (broker)</th><th class="num">Take-profit</th><th class="num">Exit in</th><th>State</th></tr></thead>
       <tbody id="pos-body"></tbody>
     </table>
     <div id="ext-wrap" hidden>
       <h3>Positions not opened by the platform</h3>
-      <table><thead><tr><th></th><th>Account</th><th>Symbol</th><th class="num">Qty</th><th class="num">Avg</th><th class="num">LTP</th><th class="num">P&amp;L</th></tr></thead>
+      <table class="cards-sm"><thead><tr><th></th><th class="c-title">Account</th><th>Symbol</th><th class="num">Qty</th><th class="num">Avg</th><th class="num">LTP</th><th class="num">P&amp;L</th></tr></thead>
         <tbody id="ext-body"></tbody></table>
     </div>
   </div>
 
   <div class="panel">
     <h2 style="margin-top:0">Broker accounts</h2>
-    <table>
-      <thead><tr><th></th><th>Account</th><th>Owner</th><th>Status</th><th class="num">Funds</th><th class="num">Gross P&amp;L</th><th class="num">Net (est.)</th><th>Feeds</th></tr></thead>
+    <table class="cards-sm">
+      <thead><tr><th></th><th class="c-title">Account</th><th>Owner</th><th>Status</th><th class="num">Funds</th><th class="num">Gross P&amp;L</th><th class="num">Net (est.)</th><th>Feeds</th></tr></thead>
       <tbody id="acc-body"></tbody>
     </table>
   </div>

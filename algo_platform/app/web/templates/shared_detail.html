@@ -1,22 +1,23 @@
 {% extends "base.html" %}
 {% block title %}{{ sh.name }}{% endblock %}
 {% block content %}
-<div class="row" style="margin-bottom:10px">
-  <h1 style="margin:0">{{ sh.name }}</h1>
+<div class="page-head">
+  <h1>{{ sh.name }}</h1>
   <span class="badge">shared</span>
-  <div class="spacer"></div>
+  <div class="actions">
   {% if can_run %}<a class="btn {{ '' if mine else 'primary' }}" href="/strategies/shared/{{ sh.id }}/run">Run this strategy</a>
   <form method="post" action="/strategies/shared/{{ sh.id }}/fork" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button type="submit" title="a copy of the rules that you can change; the original stays as it is for everyone">Make my own version</button></form>{% endif %}
   {% if can_edit_rules %}<a class="btn" href="/strategies/shared/{{ sh.id }}/edit">Edit rules</a>
   {% if not runs %}<form method="post" action="/strategies/shared/{{ sh.id }}/delete" class="inline-form" data-confirm="Delete the strategy {{ sh.name }}?" data-danger="1"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="danger" type="submit">Delete</button></form>{% endif %}{% endif %}
   <a class="btn" href="/backtest?strategy_id={{ sh.id }}">Backtest</a>
+  </div>
 </div>
 <p class="muted">{{ template.display_name }} · rules by {{ rules_by }}{% if sh.notes %} · {{ sh.notes }}{% endif %}</p>
 
 <div class="panel">
   <h2 style="margin-top:0">Partners running it</h2>
-  <table>
-    <thead><tr><th>Run</th><th>Partner</th><th>Broker account</th><th class="num">Lots</th><th>Mode</th><th>Enabled</th><th>Status</th><th class="num">Trades today</th><th class="num">Net today</th><th></th></tr></thead>
+  <table class="cards-sm">
+    <thead><tr><th class="c-title">Run</th><th>Partner</th><th>Broker account</th><th class="num">Lots</th><th>Mode</th><th>Enabled</th><th>Status</th><th class="num">Trades today</th><th class="num">Net today</th><th class="c-actions"></th></tr></thead>
     <tbody>
     {% for it in runs %}
       <tr>

@@ -20,13 +20,13 @@ NAV = [
     ("/", "Dashboard", False),
     ("/strategies", "Strategies", False),
     ("/compare", "Compare", False),
-    ("/accounts", "Broker accounts", False),
-    ("/trades", "Trades & Orders", False),
+    ("/accounts", "Accounts", False),
+    ("/trades", "Trades", False),
     ("/logs", "Logs", False),
     ("/backtest", "Backtest", False),
     ("/settings", "Settings", False),
     ("/users", "Users", True),
-    ("/audit", "Audit log", False),
+    ("/audit", "Audit", False),
 ]
 
 
@@ -64,6 +64,21 @@ def _pnl_class(v: Any) -> str:
     return "pos" if f > 0 else "neg" if f < 0 else ""
 
 
+def _asset_version() -> str:
+    """Changes whenever app.css / app.js change, so browsers fetch the new files after a deploy."""
+    import hashlib
+
+    static = Path(__file__).resolve().parent / "static"
+    h = hashlib.sha1()
+    for name in ("app.css", "app.js"):
+        try:
+            h.update((static / name).read_bytes())
+        except OSError:
+            pass
+    return h.hexdigest()[:10]
+
+
+templates.env.globals["asset_v"] = _asset_version()
 templates.env.filters["dt"] = _fmt_dt
 templates.env.filters["money"] = _money
 templates.env.filters["pnlc"] = _pnl_class

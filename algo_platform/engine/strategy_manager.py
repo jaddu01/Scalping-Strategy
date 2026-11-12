@@ -214,14 +214,34 @@ class InstanceRuntime:
             await asyncio.sleep(2)
         return False
 
+    async def _start_strategy(self, attempts: int = 24, delay: float = 5.0) -> bool:
+        """Subscribe and run on_start. After a restart several accounts download the instrument list at
+        the same time; until the data-feed account's list is in, the index cannot be found — wait for it
+        (up to attempts × delay) instead of crashing."""
+        from brokers.instruments import InstrumentNotFound
+
+        for attempt in range(1, attempts + 1):
+            try:
+                await self._subscribe_market()
+                await self.strategy.on_start()
+                return True
+            except InstrumentNotFound as exc:
+                if attempt == attempts or self._stop:
+                    raise
+                if attempt == 1:
+                    self.emit("WAITING_FOR_INSTRUMENTS", f"{exc}; waiting for the instrument list to load", Level.INFO)
+                self._set_status(STARTING, "waiting for the instrument list")
+                await asyncio.sleep(delay)
+        return False
+
     async def _main(self) -> None:
         self.started_at = self.now()
         self._set_status(STARTING)
         try:
             if not await self._wait_for_account() or not await self._wait_for_feed():
                 return
-            await self._subscribe_market()
-            await self.strategy.on_start()
+            if not await self._start_strategy():
+                return
             self.strategy.restore(self.p.trades.today_trade_infos(self.instance_id))
             self.emit("INSTANCE_STARTED", f"started in {self.mode.upper()} mode",
                       params=self.strategy.settings.model_dump(mode="json"))

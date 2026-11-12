@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 {% block title %}{{ inst.name }}{% endblock %}
 {% block content %}
-<div class="row" style="margin-bottom:10px">
-  <h1 style="margin:0">{{ inst.name }}</h1>
+<div class="page-head">
+  <h1>{{ inst.name }}</h1>
   <span class="badge {{ inst.mode }}">{{ inst.mode|upper }}</span>
   <span class="badge {{ rt.status if rt else inst.status }}">{{ rt.status if rt else inst.status }}</span>
   {% if open_position %}<span class="badge IN_TRADE">open position</span>{% endif %}
-  <div class="spacer"></div>
+  <div class="actions">
   {% if can_edit %}
     <label class="inline">Enabled <label class="switch"><input type="checkbox" class="inst-toggle" data-id="{{ inst.id }}" data-mode="{{ inst.mode }}" data-name="{{ inst.name }}" {{ 'checked' if inst.enabled }}><span></span></label></label>
     <a class="btn" href="/strategies/{{ inst.id }}/edit">{{ 'My settings' if shared else 'Edit' }}</a>
@@ -14,6 +14,7 @@
   {% endif %}
   <a class="btn" href="/logs?instance_id={{ inst.id }}">Logs</a>
   <a class="btn" href="/backtest?instance_id={{ inst.id }}">Backtest</a>
+  </div>
 </div>
 <p class="muted">{% if shared %}<a href="/strategies/shared/{{ shared.id }}">{{ shared.name }}</a> (shared rules) · {% endif %}{{ template.display_name }} · owner: {{ owner }} · broker: {{ account.label if account else '— none —' }}{% if inst.notes %} · {{ inst.notes }}{% endif %}</p>
 {% if rt and rt.message %}<div class="flash {{ 'err' if rt.status == 'ERROR' else 'ok' }}">{{ rt.message }}</div>{% endif %}

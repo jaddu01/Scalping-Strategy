@@ -2,8 +2,9 @@
 {% block title %}Broker accounts{% endblock %}
 {% import "macros.html" as m with context %}
 {% block content %}
-<div class="row" style="margin-bottom:12px">
-  <h1 style="margin:0">Broker accounts</h1><div class="spacer"></div>
+<div class="page-head">
+  <h1>Broker accounts</h1>
+  <div class="actions">
   {{ m.owner_filter(owners, owner) }}
   {% if can_trade %}
   <form method="get" action="/accounts/new" class="row">
@@ -11,11 +12,12 @@
     <button class="primary" type="submit">+ Add account</button>
   </form>
   {% endif %}
+  </div>
 </div>
 <p class="muted small">Credentials are encrypted at rest with the master key from <code>ALGO_MASTER_KEY</code> and are only ever shown masked. ⦿ = current market-data feed.</p>
 <div class="panel">
-<table>
-  <thead><tr><th></th><th>Label</th><th>Owner</th><th>Broker</th><th>Client ID</th><th>Status</th><th class="num">Funds</th><th>Last login</th><th>Order sync</th><th>Used by</th><th></th></tr></thead>
+<table class="cards-sm">
+  <thead><tr><th></th><th class="c-title">Label</th><th>Owner</th><th>Broker</th><th>Client ID</th><th>Status</th><th class="num">Funds</th><th>Last login</th><th>Order sync</th><th class="c-wide">Used by</th><th class="c-actions"></th></tr></thead>
   <tbody>
   {% for it in items %}
     <tr>

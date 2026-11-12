@@ -17,8 +17,9 @@
     </tr>
 {% endmacro %}
 {% block content %}
-<div class="row" style="margin-bottom:12px">
-  <h1 style="margin:0">Strategies</h1><div class="spacer"></div>
+<div class="page-head">
+  <h1>Strategies</h1>
+  <div class="actions">
   {{ m.owner_filter(owners, owner) }}
   {% if can_trade %}
   <form method="get" action="/strategies/new" class="row">
@@ -26,21 +27,23 @@
     <button class="primary" type="submit">+ New strategy</button>
   </form>
   {% endif %}
+  </div>
 </div>
 <p class="muted small">Each strategy's <b>rules</b> are shared by all partners. Every partner runs it with their <b>own</b> broker account, lots, paper/live mode and risk limits — “Run this strategy” adds yours.</p>
 
 {% for g in groups %}
 <div class="panel">
-  <div class="row" style="margin-bottom:6px">
-    <h2 style="margin:0"><a href="/strategies/shared/{{ g.s.id }}">{{ g.s.name }}</a></h2>
+  <div class="panel-head">
+    <h2><a href="/strategies/shared/{{ g.s.id }}">{{ g.s.name }}</a></h2>
     <span class="small muted">{{ g.s.template_id }} · rules by {{ g.rules_by }}</span>
-    <div class="spacer"></div>
+    <div class="actions">
     {% if can_trade %}<a class="btn small {{ '' if g.mine else 'primary' }}" href="/strategies/shared/{{ g.s.id }}/run">Run this strategy</a>{% endif %}
     {% if g.can_edit_rules %}<a class="btn small" href="/strategies/shared/{{ g.s.id }}/edit">Edit rules</a>{% endif %}
     <a class="btn small" href="/backtest?strategy_id={{ g.s.id }}">Backtest</a>
+    </div>
   </div>
-  <table>
-    <thead><tr><th>Run</th><th>Partner</th><th>Broker account</th><th class="num">Lots</th><th>Mode</th><th>Enabled</th><th>Status</th><th></th></tr></thead>
+  <table class="cards-sm">
+    <thead><tr><th class="c-title">Run</th><th>Partner</th><th>Broker account</th><th class="num">Lots</th><th>Mode</th><th>Enabled</th><th>Status</th><th class="c-actions"></th></tr></thead>
     <tbody>
     {% for it in g.runs %}{{ run_row(it) }}{% else %}
       <tr><td colspan="8" class="muted">Nobody {{ 'in this filter ' if owner != 'all' }}runs this strategy yet.</td></tr>
@@ -56,8 +59,8 @@
 <div class="panel">
   <h2 style="margin-top:0">Stand-alone instances</h2>
   <p class="small muted">Instances with their own rules (not shared).</p>
-  <table>
-    <thead><tr><th>Instance</th><th>Partner</th><th>Broker account</th><th class="num">Lots</th><th>Mode</th><th>Enabled</th><th>Status</th><th></th></tr></thead>
+  <table class="cards-sm">
+    <thead><tr><th class="c-title">Instance</th><th>Partner</th><th>Broker account</th><th class="num">Lots</th><th>Mode</th><th>Enabled</th><th>Status</th><th class="c-actions"></th></tr></thead>
     <tbody>{% for it in standalone %}{{ run_row(it) }}{% endfor %}</tbody>
   </table>
 </div>

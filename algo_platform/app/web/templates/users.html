@@ -6,7 +6,7 @@
 <p class="muted small">A <b>trader</b> (partner) adds their own broker account and strategies, and can start, stop, edit and kill only those.
 Everyone sees all strategies, trades and P&amp;L. Broker secrets are never shown to anyone.</p>
 <div class="panel">
-<table><thead><tr><th>User</th><th>Role</th><th>2FA</th><th>Status</th><th>Last login</th><th>Change role</th><th>Reset password</th><th></th></tr></thead>
+<table class="cards-sm"><thead><tr><th class="c-title">User</th><th>Role</th><th>2FA</th><th>Status</th><th>Last login</th><th class="c-wide">Change role</th><th class="c-wide">Reset password</th><th class="c-actions"></th></tr></thead>
 <tbody>{% for u in rows %}<tr>
   <td><b>{{ u.username }}</b>{% if u.must_change_password %} <span class="badge amber">must change password</span>{% endif %}</td>
   <td><span class="badge">{{ u.role }}</span></td><td>{{ 'on' if u.totp_enabled else 'off' }}</td>

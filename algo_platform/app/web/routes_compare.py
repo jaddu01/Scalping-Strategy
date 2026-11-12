@@ -21,7 +21,8 @@ TP_REASONS = {"take_profit", "tp1", "tp2"}
 TIME_REASONS = {"timed_exit", "square_off"}
 PERIODS = {"today": 0, "7d": 6, "30d": 29, "90d": 89}
 TEMPLATE_SHORT = {"nifty_ref_breakout": "Original", "nifty_early_breakout": "Early-Slot",
-                  "nifty_ref_breakout_tp": "Original + TP", "nifty_early_breakout_tp": "Early-Slot + TP"}
+                  "nifty_ref_breakout_tp": "Original + TP", "nifty_early_breakout_tp": "Early-Slot + TP",
+                  "nifty_two_entry": "2-Entry", "nifty_two_entry_tp": "2-Entry + TP", "ema_rsi_breakout": "EMA + RSI"}
 
 
 @dataclass

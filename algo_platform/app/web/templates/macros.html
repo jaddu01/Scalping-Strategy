@@ -57,13 +57,12 @@
 {% endmacro %}
 
 {% macro owner_filter(owners, value, extra=None) %}
-  <form method="get" class="row inline-form">
+  <form method="get" class="owner-filter">
     {% for k, v in (extra or {}).items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
-    <label class="small muted">Partner</label>
-    <select name="owner">
+    <select name="owner" aria-label="Partner">
       <option value="all" {{ 'selected' if value == 'all' }}>All partners</option>
       <option value="me" {{ 'selected' if value == 'me' }}>Mine</option>
-      {% for uid, name in owners %}<option value="{{ uid }}" {{ 'selected' if value == uid|string }}>{{ name }}</option>{% endfor %}
+      {% for uid, name in owners %}<option value="{{ uid }}" {{ 'selected' if value == uid|string }}>Partner: {{ name }}</option>{% endfor %}
     </select>
     <button class="small" type="submit">Show</button>
   </form>
