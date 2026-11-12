@@ -49,7 +49,7 @@
       <th>Dir</th><th class="num" title="NIFTY spot at the entry signal">Entry</th><th class="num" title="NIFTY spot at the exit">Exit spot</th>
       <th class="num" title="NIFTY points in the trade's favour (CE: exit − entry, PE: entry − exit); lot-weighted when TP1/TP2 sold part early">Points</th>
       <th class="num" title="option premium: entry fill → exit (average of all exits)">Premium</th><th class="num">P&amp;L</th>
-      <th>Trade</th><th>Result</th></tr></thead>
+      <th>Trade</th><th>Result</th><th title="sideways filter (core/regime.py) at the breakout">Regime</th></tr></thead>
     <tbody>
     {% for s in rt.strategy.slots %}
       {% set v = views.get(s.trade_id, {}) if s.trade_id else {} %}
@@ -64,9 +64,10 @@
         <td class="num nowrap">{% if v %}{{ v.entry_premium|money }} → {{ v.exit_premium|money }}{% endif %}</td>
         <td class="num {{ v.pnl|pnlc if v else '' }}">{% if v %}{{ v.pnl|money }}{% if v.live %} <span class="small muted">MTM</span>{% endif %}{% endif %}</td>
         <td>{% if s.trade_id %}<a href="/trades/{{ s.trade_id }}">{{ s.trade_id }}</a>{% endif %}</td>
-        <td class="small">{{ s.result or '' }}{% if v and v.exit_time and not v.live %}<br><span class="muted">{{ v.exit_time|dt('%H:%M:%S') }}</span>{% endif %}</td></tr>
+        <td class="small">{{ s.result or '' }}{% if v and v.exit_time and not v.live %}<br><span class="muted">{{ v.exit_time|dt('%H:%M:%S') }}</span>{% endif %}</td>
+        <td class="small {{ 'neg' if s.regime_block else 'muted' }}">{{ s.regime or '' }}</td></tr>
       {% if v and v.legs %}
-      <tr class="legs"><td></td><td colspan="16" class="small muted">
+      <tr class="legs"><td></td><td colspan="17" class="small muted">
         {% for leg in v.legs %}{{ leg.label }} {{ leg.lots }} lot{{ 's' if leg.lots != 1 }} @ spot {{ leg.spot|money }}{% if leg.points is not none %} ({{ '%+.2f'|format(leg.points) }} pts){% endif %}, premium {{ leg.premium|money }}{{ ' · ' if not loop.last }}{% endfor %}
       </td></tr>
       {% endif %}
@@ -75,7 +76,7 @@
     {% if totals and totals.trades %}
     <tfoot><tr><th colspan="12">Today: {{ totals.trades }} trade{{ 's' if totals.trades != 1 }}</th>
       <th class="num {{ totals.points|pnlc }}">{{ '%+.2f'|format(totals.points) }}</th><th></th>
-      <th class="num {{ totals.pnl|pnlc }}">{{ totals.pnl|money }}</th><th colspan="2"></th></tr></tfoot>
+      <th class="num {{ totals.pnl|pnlc }}">{{ totals.pnl|money }}</th><th colspan="3"></th></tr></tfoot>
     {% endif %}
   </table>
 {% endif %}

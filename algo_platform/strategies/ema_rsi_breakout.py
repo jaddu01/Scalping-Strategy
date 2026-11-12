@@ -32,17 +32,16 @@ from brokers.base import Candle, Exchange, Instrument, InstrumentKey, Instrument
 from core.clock import combine, fmt_hm
 from core.events import Category, Level
 from core.indicators import ATR, EMA, RSI
-from core.regime import RegimeConfig, check_regime, summarize
 from strategies.base import Direction, EntrySignal, ExitPlan, PartialTarget, Strategy, StrategySettings, TradeInfo
 from strategies.nifty_ref_breakout import (BSE_INDICES, DERIVATIVE_EXCHANGE, MARKET_CLOSE, MARKET_OPEN, atm_strike,
                                            pick_expiry)
+from strategies.regime_filter import REGIME_CANDLES, RegimeSettings, blocks, regime_of
 from strategies.registry import register
 
 TRAIL_MIN_STEP = 0.5  # points; smaller moves of the trailing stop are not sent
-REGIME_CANDLES = 300  # completed candles kept for the sideways filter (enough for its EMA / ATR to settle)
 
 
-class EmaRsiBreakoutSettings(StrategySettings):
+class EmaRsiBreakoutSettings(RegimeSettings):
     FORM_FIRST: ClassVar[tuple[str, ...]] = ("underlying", "exchange", "candle_timeframe_min", "lots")
 
     underlying: str = Field("NIFTY", title="Underlying index",
@@ -104,21 +103,6 @@ class EmaRsiBreakoutSettings(StrategySettings):
                                      description="Optional broker-side disaster stop; 0 = off")
     warmup_candles: int = Field(300, ge=50, le=2000, title="Warm-up candles",
                                 description="History loaded at start so EMA / RSI match the chart")
-    # --- sideways (chop) filter, core/regime.py
-    regime_filter: Literal["off", "log_only", "block"] = Field(
-        "log_only", title="Sideways filter",
-        description="log_only: record whether the market looked sideways next to every setup and trade, never "
-                    "block · block: skip setups / entries when it does · off: not computed")
-    regime_min_fails: int = Field(2, ge=1, le=5, title="Sideways: block when at least N checks fail",
-                                  description="Checks: flat EMA, weak ADX, high Choppiness, many EMA crosses, tight box")
-    regime_min_slope_atr: float = Field(0.3, ge=0, le=10, title="Sideways: min EMA slope (× ATR over 5 candles)")
-    regime_min_adx: float = Field(20, ge=0, le=100, title="Sideways: min ADX(14)")
-    regime_max_chop: float = Field(61.8, gt=0, le=100, title="Sideways: max Choppiness Index(14)")
-    regime_max_crosses: int = Field(3, ge=0, le=20, title="Sideways: max EMA crosses in the last 20 candles")
-    regime_min_range_atr: float = Field(2.5, ge=0, le=50, title="Sideways: min 1-hour box height (× ATR)")
-    regime_block_against_slope: bool = Field(
-        False, title="Sideways: also block trades against the EMA slope",
-        description="CE only when the EMA slopes up, PE only when it slopes down (recorded either way)")
 
     @field_validator("underlying")
     @classmethod
@@ -165,12 +149,6 @@ class EmaRsiBreakoutSettings(StrategySettings):
     @property
     def buffer(self) -> float:
         return round(self.buffer_ticks * self.tick_size, 4)
-
-    def regime_config(self) -> RegimeConfig:
-        return RegimeConfig(ema_len=self.ema_length, min_fails=self.regime_min_fails,
-                            min_slope_atr=self.regime_min_slope_atr, min_adx=self.regime_min_adx,
-                            max_chop=self.regime_max_chop, max_crosses=self.regime_max_crosses,
-                            min_range_atr=self.regime_min_range_atr)
 
 
 @dataclass
@@ -447,21 +425,17 @@ class EmaRsiBreakout(Strategy):
                             f"trigger={trig:.2f} SL={stop:.2f} EMA={ema:.2f} RSI={rsi:.2f} until={fmt_hm(x.valid_until)}"
                             f"{note}",
                    setup=x.no, direction=d, trigger=trig, stop=stop, ema=ema, rsi=rsi, regime=regime)
-        if regime and regime["would_block"] and s.regime_filter == "block":
+        if blocks(s, regime):
             x.state, x.result = "SKIPPED", "sideways"
             self._emit("REGIME_BLOCKED", f"setup #{x.no} {d} skipped: {regime['note']}", setup=x.no, regime=regime)
 
     def _regime(self, direction: str) -> dict[str, Any] | None:
-        """The sideways filter on the completed candles (None when it is off)."""
-        s = self.settings
-        if s.regime_filter == "off":
-            return None
+        """The sideways filter on this strategy's own completed candles (None when it is off)."""
         try:
-            r = check_regime(self.ind.candles[-REGIME_CANDLES:], s.regime_config())
+            return regime_of(self.settings, self.ind.candles, direction)
         except Exception as exc:  # never let the filter break the strategy; log-only data is just missing
             self._emit("REGIME_FAILED", f"sideways filter failed: {exc}", Level.WARNING)
             return None
-        return summarize(r, direction, s.regime_block_against_slope, s.regime_filter)  # type: ignore[arg-type]
 
     async def _rsi_exits(self, a: Setup, rsi: float, where: str) -> bool:
         """TP1 / TP2 (or the single RSI exit when TP is off). True if something was sold."""
@@ -563,7 +537,7 @@ class EmaRsiBreakout(Strategy):
             a.state, a.result = "REJECTED", "no_expiry_available"
             return
         a.regime_entry = self._regime(a.direction)
-        if a.regime_entry and a.regime_entry["would_block"] and s.regime_filter == "block":
+        if blocks(s, a.regime_entry):
             a.state, a.result = "SKIPPED", "sideways_at_entry"
             self._emit("REGIME_BLOCKED", f"setup #{a.no} {a.direction} entry skipped: {a.regime_entry['note']}",
                        setup=a.no, regime=a.regime_entry)

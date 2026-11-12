@@ -9,6 +9,8 @@ At fixed times a specific index spot candle becomes the reference candle. After 
 Entry is allowed from the reference close until the hard exit (reference START + exit_offset_min, or
 the slot's own exit time in schedules that set one), limited further by the entry window. First breakout only, max one trade per slot, no
 re-entry, one open position per instance. Every trade is force-closed at the slot's exit time.
+Sideways filter (strategies/regime_filter.py): at the breakout the chop checks run on the index's last 300 completed
+candles; "log_only" (default) saves the result with the signal and trade, "block" skips the slot.
 """
 from __future__ import annotations
 
@@ -33,6 +35,7 @@ from strategies.base import (
     TakeProfitMode,
     TradeInfo,
 )
+from strategies.regime_filter import RegimeSettings, blocks, regime_check
 from strategies.registry import register
 
 DEFAULT_REF_STARTS = ["09:45", "10:00", "10:15", "10:45", "11:15", "11:45", "12:10", "12:45",
@@ -48,7 +51,7 @@ CANDLE_CLOSE_GRACE = timedelta(seconds=15)
 RETIRED_KEYS = {"trailing_stop", "trail_timeframe_min", "skip_if_other_strategy_holds"}
 
 
-class BreakoutBaseSettings(StrategySettings):
+class BreakoutBaseSettings(RegimeSettings):
     """Settings and checks shared by every reference-candle breakout template. A subclass adds its
     schedule and implements `slot_times()`."""
 
@@ -241,6 +244,7 @@ class Slot:
     result: str | None = None
     events: list[str] = field(default_factory=list)
     ref_lookup_done: bool = False  # missed slot: tried to fetch its reference candle for display
+    regime: dict[str, Any] | None = None  # sideways filter at the breakout
 
     @property
     def slot_id(self) -> str:
@@ -266,6 +270,8 @@ class Slot:
             "direction": self.direction.value if self.direction else None,
             "trade_id": self.trade_id,
             "result": self.result,
+            "regime": (self.regime or {}).get("note"),
+            "regime_block": bool((self.regime or {}).get("would_block")),
         }
 
 
@@ -277,6 +283,7 @@ class Slot:
             "ref": ({"open": self.ref.open, "high": self.ref.high, "low": self.ref.low, "close": self.ref.close,
                      "source": self.ref.source} if self.ref else None),
             "long_trigger": self.long_trigger, "short_trigger": self.short_trigger,
+            "regime": self.regime,
         }
 
 
@@ -355,6 +362,7 @@ class NiftyRefBreakout(Strategy):
                                   "low−buffer; spot-based SL; hard exit at reference start + offset.")
     version: ClassVar[str] = "2.0"
     settings_model: ClassVar[type[StrategySettings]] = NiftyRefBreakoutSettings
+    warmup_days: ClassVar[int] = 4  # backtests load earlier days so the sideways filter has ~300 candles
 
     def __init__(self, settings: BreakoutBaseSettings, ctx: Any) -> None:
         super().__init__(settings, ctx)
@@ -418,6 +426,8 @@ class NiftyRefBreakout(Strategy):
                 s.ref = Candle(start=s.ref_start, timeframe_min=self.settings.candle_timeframe_min, open=r["open"],
                                high=r["high"], low=r["low"], close=r["close"], source=r.get("source") or "saved")
                 s.long_trigger, s.short_trigger = sv.get("long_trigger"), sv.get("short_trigger")
+            if sv:
+                s.regime = sv.get("regime")
                 if s.long_trigger is None or s.short_trigger is None:
                     s.long_trigger, s.short_trigger = triggers(s.ref.high, s.ref.low, self.settings.buffer_points)
             if s.slot_id in self._restored:
@@ -451,6 +461,17 @@ class NiftyRefBreakout(Strategy):
         self.spot = self.ctx.resolve(self.spot_key)
         now = self.ctx.now()
         self._build_day(now.date(), now)
+        if self.settings.regime_filter != "off":
+            await self._regime(Direction.CE_BUY)  # loads the shared candle history now, not at the first breakout
+
+    async def _regime(self, direction: Direction) -> dict[str, Any] | None:
+        """Sideways filter on the index's completed candles (None when off or unavailable)."""
+        try:
+            return await regime_check(self.ctx, self.settings, self.spot, self.settings.candle_timeframe_min,
+                                      direction.value)
+        except Exception as exc:  # never let the filter break the strategy
+            self._emit("REGIME_FAILED", f"sideways filter failed: {exc}", Level.WARNING)
+            return None
 
     def restore(self, trades: list[TradeInfo]) -> None:
         self._restored = {t.slot_id: t for t in trades}
@@ -581,6 +602,16 @@ class NiftyRefBreakout(Strategy):
             self._emit("SIGNAL_REJECTED", f"slot=#{s.no} dir={direction.value} reason=already_in_position",
                        Level.WARNING, slot=s.no, reason="already_in_position")
             return
+        s.regime = await self._regime(direction)
+        if s.regime is not None:
+            self._emit("REGIME", f"slot=#{s.no} dir={direction.value} regime={s.regime['note']}",
+                       Level.WARNING if s.regime["would_block"] else Level.INFO, slot=s.no, regime=s.regime)
+        if blocks(self.settings, s.regime):
+            s.state, s.result = SlotState.SKIPPED, "sideways"
+            self._emit("REGIME_BLOCKED", f"slot=#{s.no} dir={direction.value} skipped: {s.regime['note']}",  # type: ignore[index]
+                       Level.WARNING, slot=s.no, reason="sideways", regime=s.regime)
+            self._persist()
+            return
         spot = spot_for_strike if spot_for_strike is not None else price
         strike = atm_strike(spot, self.settings.strike_step)
         expiry = pick_expiry(self.ctx.option_expiries(self.settings.underlying, self.option_exchange), now.date(),
@@ -610,7 +641,7 @@ class NiftyRefBreakout(Strategy):
                 partial_targets=self.partial_targets(direction, spot, s.ref),
             ),
             meta={"slot_no": s.no, "underlying": self.settings.underlying, "ref_start": fmt_hm(s.ref_start), "ref_high": s.ref.high, "ref_low": s.ref.low,
-                  "buffer": self.settings.buffer_points, "trigger_price": price},
+                  "buffer": self.settings.buffer_points, "trigger_price": price, "regime_entry": s.regime},
         )
         self._persist()  # saved as ENTERING before the order: a restart now can never enter this slot again
         info = await self.ctx.submit_entry(signal)

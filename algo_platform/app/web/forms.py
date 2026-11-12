@@ -82,7 +82,8 @@ def build_fields(model: type[BaseModel], values: dict[str, Any] | BaseModel | No
     out: list[FormField] = []
     # a model can list the fields to show first (e.g. a strategy's schedule) via FORM_FIRST
     first = [n for n in getattr(model, "FORM_FIRST", ()) if n in model.model_fields]
-    ordered = first + [n for n in model.model_fields if n not in first]
+    last = [n for n in getattr(model, "FORM_LAST", ()) if n in model.model_fields and n not in first]  # e.g. filters
+    ordered = first + [n for n in model.model_fields if n not in first and n not in last] + last
     for name in ordered:
         fi = model.model_fields[name]
         path = f"{prefix}{name}"

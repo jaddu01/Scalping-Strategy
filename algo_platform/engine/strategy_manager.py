@@ -103,6 +103,9 @@ class InstanceRuntime:
     async def history(self, instrument: Instrument, timeframe_min: int, count: int) -> list[Candle]:
         return await self.p.market.history(instrument, timeframe_min, count)
 
+    async def recent_candles(self, instrument: Instrument, timeframe_min: int, count: int) -> list[Candle]:
+        return await self.p.market.recent_candles(instrument, timeframe_min, count)
+
     def tighten_stop(self, trade_id: str, level: float) -> None:
         self.p.trades.tighten_stop(trade_id, level, instance_id=self.instance_id)
 

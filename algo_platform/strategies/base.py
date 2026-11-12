@@ -134,6 +134,11 @@ class StrategyContext(Protocol):
         """The last `count` completed candles of `instrument` (oldest first), e.g. to warm up indicators."""
         ...
 
+    async def recent_candles(self, instrument: Instrument, timeframe_min: int, count: int) -> list[Candle]:
+        """Like `history`, but served from one in-memory buffer per index shared by all strategies (live engine
+        only; strategies fall back to `history` when a context does not have it)."""
+        ...
+
     def tighten_stop(self, trade_id: str, level: float) -> None:
         """Move the trade's spot stop-loss to `level` if that is tighter (trailing stop); never loosens it."""
         ...

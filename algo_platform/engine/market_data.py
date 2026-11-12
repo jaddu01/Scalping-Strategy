@@ -20,6 +20,7 @@ from engine.calendar import MarketCalendar
 from engine.candles import CandleBuilder, candles_match
 
 log = logging.getLogger("algo.marketdata")
+RECENT_KEEP = 300  # completed candles kept per index / timeframe for the sideways filter
 
 TickListener = Callable[[str, Tick], None]
 CandleListener = Callable[[str, Candle], None]
@@ -74,6 +75,14 @@ class MarketDataService:
         self.builder.add_listener(self._on_candle_closed)
         self._candle_listeners: dict[str, list[CandleListener]] = {}
         self._candle_cache: dict[tuple[str, datetime, int], Candle] = {}
+        # one broker request per candle / history window, however many strategies ask at the same moment
+        # (12 runs fetching the 09:30 reference candle together hit Angel's rate limit on 12-Nov-2026)
+        self._inflight: dict[tuple[Any, ...], asyncio.Task[Any]] = {}
+        # rolling completed candles per (series, timeframe) for the sideways filter, shared by all strategies
+        self._recent: dict[tuple[str, int], list[Candle]] = {}
+        self._recent_locks: dict[tuple[str, int], asyncio.Lock] = {}
+        self._recent_warm: set[tuple[str, int]] = set()
+        self._recent_reload: dict[tuple[str, int], datetime] = {}
         self._raw_listeners: list[Callable[[str, InstrumentKey, Tick], None]] = []
         self._stale_reported = False
         self._attached_at: datetime | None = None
@@ -286,16 +295,90 @@ class MarketDataService:
 
     # ------------------------------------------------------------------ candles
     def _on_candle_closed(self, series: str, candle: Candle) -> None:
+        buf = self._recent.get((series, candle.timeframe_min))
+        if buf is not None and (not buf or candle.start > buf[-1].start):
+            buf.append(candle)
+            if len(buf) > RECENT_KEEP + 100:
+                del buf[:-RECENT_KEEP]
         for cb in list(self._candle_listeners.get(series, [])):
             try:
                 cb(series, candle)
             except Exception:
                 log.exception("candle listener failed")
 
+    async def _shared(self, key: tuple[Any, ...], make: Callable[[], Any]) -> Any:
+        """Run `make()` once for callers asking for the same `key` at the same time; all get its result."""
+        task = self._inflight.get(key)
+        if task is None:
+            task = asyncio.get_running_loop().create_task(make())
+            self._inflight[key] = task
+            task.add_done_callback(lambda _t: self._inflight.pop(key, None))
+        return await asyncio.shield(task)
+
     async def history(self, inst: Instrument, timeframe_min: int, count: int) -> list[Candle]:
         """Last `count` completed candles from the feed account's historical API (oldest first)."""
         if self.feed is None or count <= 0:
             return []
+        rows = await self._shared(("history", series_of(inst), timeframe_min, count, self.clock.now().replace(second=0, microsecond=0)),
+                                  lambda: self._history_once(inst, timeframe_min, count))
+        return list(rows)
+
+    async def recent_candles(self, inst: Instrument, timeframe_min: int, count: int = RECENT_KEEP) -> list[Candle]:
+        """The last `count` completed candles, kept in memory per index and timeframe for every strategy:
+        loaded from history once, then extended by each candle closing from ticks."""
+        series, k = series_of(inst), (series_of(inst), timeframe_min)
+        self.builder.track(series, timeframe_min)
+        lock = self._recent_locks.setdefault(k, asyncio.Lock())
+        async with lock:
+            live = self._recent.setdefault(k, [])  # from now on, closing candles are collected here
+            now = self.clock.now()
+            if k in self._recent_warm and live and self._has_gap(live[-1], timeframe_min, now) \
+                    and now - self._recent_reload.get(k, datetime.min.replace(tzinfo=now.tzinfo)) > timedelta(minutes=10):
+                self._recent_warm.discard(k)  # ticks stopped for a while (feed drop): fill the gap from history
+            if k not in self._recent_warm:
+                self._recent_reload[k] = now
+                hist = await self.history(inst, timeframe_min, RECENT_KEEP)
+                if not hist:
+                    return []  # no feed / fetch failed: try again on the next call
+                live[:] = hist + [c for c in live if c.start > hist[-1].start]  # + those closed meanwhile
+                self._recent_warm.add(k)
+            buf = live
+            # a candle built from ticks that began mid-candle (e.g. right after a restart): swap in the broker's,
+            # in the background so an entry check never waits for it
+            for c in buf[-3:]:
+                if not getattr(c, "complete", True) and ("fix", k, c.start) not in self._inflight:
+                    self._fix_partial(inst, k, c.start)
+            return buf[-count:]
+
+    def _fix_partial(self, inst: Instrument, k: tuple[str, int], start: datetime) -> None:
+        async def run() -> None:
+            full = await self.get_candle(inst, start, k[1])
+            buf = self._recent.get(k) or []
+            if full is not None and full.complete:
+                for i in range(len(buf) - 1, -1, -1):
+                    if buf[i].start == start:
+                        buf[i] = full
+                        break
+        key = ("fix", k, start)
+        task = asyncio.get_running_loop().create_task(run())
+        self._inflight[key] = task
+        task.add_done_callback(lambda _t: self._inflight.pop(key, None))
+
+    @staticmethod
+    def _has_gap(last: Candle, timeframe_min: int, now: datetime) -> bool:
+        """True if, during today's session, more than two candles are missing after `last`."""
+        from core.clock import combine
+        from datetime import time
+
+        tf = timedelta(minutes=timeframe_min)
+        open_, close_ = combine(now.date(), time(9, 15)), combine(now.date(), time(15, 30))
+        if not (open_ + 3 * tf <= now <= close_ + tf):
+            return False
+        expected_from = max(last.start + tf, open_)
+        return now - expected_from > 3 * tf
+
+    async def _history_once(self, inst: Instrument, timeframe_min: int, count: int) -> list[Candle]:
+        assert self.feed is not None
         now = self.clock.now()
         trading_days = -(-count * timeframe_min // 375) + 1
         start = now - timedelta(days=trading_days * 2 + 4)  # room for weekends and holidays
@@ -311,10 +394,14 @@ class MarketDataService:
     async def get_candle(self, inst: Instrument, start: datetime, timeframe_min: int) -> Candle | None:
         """Reference candle: built from ticks, cross-checked with the broker's historical API.
         The broker's candle wins on mismatch (broker is the source of truth)."""
-        series = series_of(inst)
-        ck = (series, start, timeframe_min)
+        ck = (series_of(inst), start, timeframe_min)
         if ck in self._candle_cache:
             return self._candle_cache[ck]
+        return await self._shared(("candle", *ck), lambda: self._get_candle_once(inst, start, timeframe_min))
+
+    async def _get_candle_once(self, inst: Instrument, start: datetime, timeframe_min: int) -> Candle | None:
+        series = series_of(inst)
+        ck = (series, start, timeframe_min)
         built = self.builder.get(series, start, timeframe_min)
         hist: Candle | None = None
         if self.feed is not None:
