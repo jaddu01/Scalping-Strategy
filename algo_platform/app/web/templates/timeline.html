@@ -27,6 +27,10 @@
   <h2 style="margin-top:0">Plan</h2>
   <table>
     <tr><th>Slot</th><td>{{ t.slot_id }}</td></tr>
+    {% for key, label in (('regime', 'Regime at setup'), ('regime_entry', 'Regime at entry')) %}{% set rg = (t.meta or {}).get(key) %}{% if rg %}
+    <tr><th>{{ label }}</th><td class="small"><span class="{{ 'neg' if rg.would_block else '' }}">{{ rg.note }}</span>
+      <div class="muted mono">{% for k, v in (rg.metrics or {}).items() %}{{ k }}={{ v }}{{ ' · ' if not loop.last }}{% endfor %}</div></td></tr>
+    {% endif %}{% endfor %}
     <tr><th>Signal</th><td>{{ t.signal_time|dt }} · spot {{ t.signal_spot|money }} · trigger {{ t.signal_trigger|money }} · premium {{ t.signal_premium|money }}</td></tr>
     <tr><th>Spot SL</th><td>{{ t.spot_sl|money }} ({{ 'exit if spot ≤' if t.spot_sl_side == 'below' else 'exit if spot ≥' }})</td></tr>
     <tr><th>Take-profit</th><td>{{ t.tp_spot_level|money if t.tp_spot_level else (t.tp_premium_level|money ~ ' premium' if t.tp_premium_level else '–') }}</td></tr>

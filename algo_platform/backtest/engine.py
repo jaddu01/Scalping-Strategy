@@ -98,6 +98,8 @@ class SimTrade:
                                       + (f" (RSI {p['rsi']:.1f})" if p.get("rsi") is not None else "")
                                       for p in self.partial_fills),
                 "rsi_in": self.meta.get("rsi_in"), "rsi_out": self.meta.get("rsi_out"),
+                "regime": (self.meta.get("regime_entry") or self.meta.get("regime") or {}).get("note"),
+                "regime_block": bool((self.meta.get("regime_entry") or self.meta.get("regime") or {}).get("would_block")),
                 "gross": self.gross, "charges": self.charges, "net": self.net}
 
     def _points(self) -> float:

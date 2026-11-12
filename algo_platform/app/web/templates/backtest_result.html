@@ -20,13 +20,18 @@
   <div class="panel"><h2 style="margin-top:0">Assumptions</h2><table>{% for k, v in res.assumptions.items() if k != 'charges' %}<tr><th>{{ k }}</th><td class="small">{{ v }}</td></tr>{% endfor %}</table></div>
 </div>
 {% set show_rsi = res.trades|map(attribute='rsi_in')|reject('undefined')|reject('none')|list|length > 0 %}
+{% set show_regime = res.trades|selectattr('regime')|list|length > 0 %}
+{% if show_regime %}{% set blocked = res.trades|selectattr('regime_block')|list %}{% set b_net = blocked|map(attribute='net')|reject('none')|sum %}{% set all_net = res.trades|map(attribute='net')|reject('none')|sum %}
+<div class="panel small">Sideways filter: <b>{{ blocked|length }}</b> of {{ res.trades|length }} trades would have been blocked ·
+  their net <span class="{{ b_net|pnlc }}">{{ b_net|money }}</span> ·
+  the other trades' net <span class="{{ (all_net - b_net)|pnlc }}">{{ (all_net - b_net)|money }}</span></div>{% endif %}
 <div class="panel"><h2 style="margin-top:0">Trades</h2>
-<table><thead><tr><th>#</th><th>Day</th><th>Slot</th><th>Ref</th><th>Dir</th><th>Strike</th><th>Signal</th><th class="num">Spot</th>{% if show_rsi %}<th class="num" title="live RSI when the entry filled">RSI in</th>{% endif %}<th class="num">SL</th><th class="num">Prem in</th><th>Exit</th><th class="num">Exit spot</th>{% if show_rsi %}<th class="num" title="live RSI when the last lots exited">RSI out</th>{% endif %}<th class="num">Prem out</th><th>Reason</th><th class="num">Pts</th><th class="num">Gross</th><th class="num">Net</th></tr></thead>
+<table><thead><tr><th>#</th><th>Day</th><th>Slot</th><th>Ref</th><th>Dir</th><th>Strike</th><th>Signal</th><th class="num">Spot</th>{% if show_rsi %}<th class="num" title="live RSI when the entry filled">RSI in</th>{% endif %}<th class="num">SL</th><th class="num">Prem in</th><th>Exit</th><th class="num">Exit spot</th>{% if show_rsi %}<th class="num" title="live RSI when the last lots exited">RSI out</th>{% endif %}<th class="num">Prem out</th><th>Reason</th>{% if show_regime %}<th>Regime</th>{% endif %}<th class="num">Pts</th><th class="num">Gross</th><th class="num">Net</th></tr></thead>
 <tbody>{% for t in res.trades %}<tr><td>{{ t.trade_id }}</td><td class="nowrap">{{ t.day }}</td><td>{{ t.slot }}</td><td>{{ t.ref_start }}</td><td>{{ t.direction }}</td><td>{{ t.strike }}</td><td>{{ t.signal_time }}</td>
   <td class="num">{{ t.entry_spot|money }}</td>{% if show_rsi %}<td class="num">{{ '%.1f'|format(t.get('rsi_in')) if t.get('rsi_in') is not none else '–' }}</td>{% endif %}<td class="num">{{ t.spot_sl|money }}</td><td class="num">{{ t.entry_premium|money }}</td><td>{{ t.exit_time }}</td><td class="num">{{ t.exit_spot|money }}</td>{% if show_rsi %}<td class="num">{{ '%.1f'|format(t.get('rsi_out')) if t.get('rsi_out') is not none else '–' }}</td>{% endif %}
-  <td class="num">{{ t.exit_premium|money }}</td><td class="small">{{ t.exit_reason }}{% if t.partials %}<br>{{ t.partials }}{% endif %}</td><td class="num {{ t.spot_points|pnlc }}">{{ t.spot_points }}</td>
+  <td class="num">{{ t.exit_premium|money }}</td><td class="small">{{ t.exit_reason }}{% if t.partials %}<br>{{ t.partials }}{% endif %}</td>{% if show_regime %}<td class="small {{ 'neg' if t.regime_block else 'muted' }}">{{ t.regime or '' }}</td>{% endif %}<td class="num {{ t.spot_points|pnlc }}">{{ t.spot_points }}</td>
   <td class="num {{ t.gross|pnlc }}">{{ t.gross|money }}</td><td class="num {{ t.net|pnlc }}">{{ t.net|money }}</td></tr>
-{% else %}<tr><td colspan="19" class="muted">No trades.</td></tr>{% endfor %}</tbody></table></div>
+{% else %}<tr><td colspan="20" class="muted">No trades.</td></tr>{% endfor %}</tbody></table></div>
 <details class="panel"><summary>Strategy log ({{ res.events|length }} lines)</summary><pre>{% for e in res.events %}[{{ e.time }}] {{ e.message }}
 {% endfor %}</pre></details>
 {% endblock %}

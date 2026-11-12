@@ -16,6 +16,9 @@ Exits on this platform (TP1 / TP2 replace the script's single RSI 70 exit):
   trail          after TP1 the stop of the remaining lots trails 1.5 × ATR behind the best price since entry
   rest           spot SL / trailing stop, the script's early exit (a close back through EMA 21), or the 15:15 hard exit
 New entries only between 09:20 and 15:00; one position at a time; risk checks as usual.
+Sideways filter (core/regime.py): when a setup arms and again when its breakout fires, five chop checks run on the
+completed candles (flat EMA, low ADX, high Choppiness, many EMA crosses, tight 1-hour box). "log_only" (default)
+saves the reasons and metrics with the signal and trade; "block" skips the setup / entry when it is sideways.
 """
 from __future__ import annotations
 
@@ -29,12 +32,14 @@ from brokers.base import Candle, Exchange, Instrument, InstrumentKey, Instrument
 from core.clock import combine, fmt_hm
 from core.events import Category, Level
 from core.indicators import ATR, EMA, RSI
+from core.regime import RegimeConfig, check_regime, summarize
 from strategies.base import Direction, EntrySignal, ExitPlan, PartialTarget, Strategy, StrategySettings, TradeInfo
 from strategies.nifty_ref_breakout import (BSE_INDICES, DERIVATIVE_EXCHANGE, MARKET_CLOSE, MARKET_OPEN, atm_strike,
                                            pick_expiry)
 from strategies.registry import register
 
 TRAIL_MIN_STEP = 0.5  # points; smaller moves of the trailing stop are not sent
+REGIME_CANDLES = 300  # completed candles kept for the sideways filter (enough for its EMA / ATR to settle)
 
 
 class EmaRsiBreakoutSettings(StrategySettings):
@@ -99,6 +104,21 @@ class EmaRsiBreakoutSettings(StrategySettings):
                                      description="Optional broker-side disaster stop; 0 = off")
     warmup_candles: int = Field(300, ge=50, le=2000, title="Warm-up candles",
                                 description="History loaded at start so EMA / RSI match the chart")
+    # --- sideways (chop) filter, core/regime.py
+    regime_filter: Literal["off", "log_only", "block"] = Field(
+        "log_only", title="Sideways filter",
+        description="log_only: record whether the market looked sideways next to every setup and trade, never "
+                    "block · block: skip setups / entries when it does · off: not computed")
+    regime_min_fails: int = Field(2, ge=1, le=5, title="Sideways: block when at least N checks fail",
+                                  description="Checks: flat EMA, weak ADX, high Choppiness, many EMA crosses, tight box")
+    regime_min_slope_atr: float = Field(0.3, ge=0, le=10, title="Sideways: min EMA slope (× ATR over 5 candles)")
+    regime_min_adx: float = Field(20, ge=0, le=100, title="Sideways: min ADX(14)")
+    regime_max_chop: float = Field(61.8, gt=0, le=100, title="Sideways: max Choppiness Index(14)")
+    regime_max_crosses: int = Field(3, ge=0, le=20, title="Sideways: max EMA crosses in the last 20 candles")
+    regime_min_range_atr: float = Field(2.5, ge=0, le=50, title="Sideways: min 1-hour box height (× ATR)")
+    regime_block_against_slope: bool = Field(
+        False, title="Sideways: also block trades against the EMA slope",
+        description="CE only when the EMA slopes up, PE only when it slopes down (recorded either way)")
 
     @field_validator("underlying")
     @classmethod
@@ -146,6 +166,12 @@ class EmaRsiBreakoutSettings(StrategySettings):
     def buffer(self) -> float:
         return round(self.buffer_ticks * self.tick_size, 4)
 
+    def regime_config(self) -> RegimeConfig:
+        return RegimeConfig(ema_len=self.ema_length, min_fails=self.regime_min_fails,
+                            min_slope_atr=self.regime_min_slope_atr, min_adx=self.regime_min_adx,
+                            max_chop=self.regime_max_chop, max_crosses=self.regime_max_crosses,
+                            min_range_atr=self.regime_min_range_atr)
+
 
 @dataclass
 class Setup:
@@ -166,6 +192,8 @@ class Setup:
     exit_requested: bool = False
     best: float | None = None  # best spot price since entry (high for CE, low for PE)
     trail_stop: float | None = None  # current trailed stop, once moved
+    regime: dict[str, Any] | None = None  # sideways filter when the setup armed
+    regime_entry: dict[str, Any] | None = None  # ... and when the breakout fired
 
     @property
     def slot_id(self) -> str:
@@ -187,7 +215,9 @@ class Setup:
         return {"no": self.no, "time": fmt_hm(self.candle_start), "direction": self.direction,
                 "conf_high": self.conf_high, "conf_low": self.conf_low, "trigger": self.trigger, "stop": self.stop,
                 "valid_until": fmt_hm(self.valid_until), "state": self.state, "result": self.result,
-                "trade_id": self.trade_id, "tp_done": list(self.tp_done), "trail_stop": self.trail_stop}
+                "trade_id": self.trade_id, "tp_done": list(self.tp_done), "trail_stop": self.trail_stop,
+                "regime": (self.regime_entry or self.regime or {}).get("note"),
+                "regime_block": (self.regime_entry or self.regime or {}).get("would_block", False)}
 
 
 class Indicators:
@@ -201,6 +231,7 @@ class Indicators:
         self.lows: list[float] = []
         self.highs: list[float] = []
         self.last: Candle | None = None
+        self.candles: list[Candle] = []  # completed candles for the sideways filter, oldest first
         self.values: dict[str, float | None] = {"ema": None, "rsi": None, "atr": None}
         self.crosses: dict[str, bool] = {k: False for k in self.since}
 
@@ -219,6 +250,9 @@ class Indicators:
         self.lows = (self.lows + [c.low])[-self.s.swing_length:]
         self.highs = (self.highs + [c.high])[-self.s.swing_length:]
         self.last = c
+        self.candles.append(c)
+        if len(self.candles) > REGIME_CANDLES + 50:
+            del self.candles[:-REGIME_CANDLES]
         self.values = {"ema": ema, "rsi": rsi, "atr": atr}
 
     def ready(self) -> bool:
@@ -396,6 +430,7 @@ class EmaRsiBreakout(Strategy):
         old = self.active
         if old is not None and old.state == "PENDING":
             old.state, old.result = "CANCELLED", "replaced_by_new_setup"
+        regime = self._regime("CE_BUY" if long_conf else "PE_BUY")
         buf = s.buffer
         if long_conf:
             d, trig = "CE_BUY", round(c.high + buf, 2)
@@ -405,11 +440,28 @@ class EmaRsiBreakout(Strategy):
             stop = round((c.high if s.sl_mode == "confirmation_candle" else max(ind.highs)) + buf, 2)
         x = Setup(no=len(self.setups) + 1, direction=d, candle_start=c.start, conf_high=c.high, conf_low=c.low,
                   trigger=trig, stop=stop,
-                  valid_until=close_time + timedelta(minutes=s.candle_timeframe_min * s.valid_bars))
+                  valid_until=close_time + timedelta(minutes=s.candle_timeframe_min * s.valid_bars), regime=regime)
         self.setups.append(x)
+        note = f" regime={regime['note']}" if regime else ""
         self._emit("SETUP", f"SETUP #{x.no} {d} candle={fmt_hm(c.start)} H={c.high:.2f} L={c.low:.2f} "
-                            f"trigger={trig:.2f} SL={stop:.2f} EMA={ema:.2f} RSI={rsi:.2f} until={fmt_hm(x.valid_until)}",
-                   setup=x.no, direction=d, trigger=trig, stop=stop, ema=ema, rsi=rsi)
+                            f"trigger={trig:.2f} SL={stop:.2f} EMA={ema:.2f} RSI={rsi:.2f} until={fmt_hm(x.valid_until)}"
+                            f"{note}",
+                   setup=x.no, direction=d, trigger=trig, stop=stop, ema=ema, rsi=rsi, regime=regime)
+        if regime and regime["would_block"] and s.regime_filter == "block":
+            x.state, x.result = "SKIPPED", "sideways"
+            self._emit("REGIME_BLOCKED", f"setup #{x.no} {d} skipped: {regime['note']}", setup=x.no, regime=regime)
+
+    def _regime(self, direction: str) -> dict[str, Any] | None:
+        """The sideways filter on the completed candles (None when it is off)."""
+        s = self.settings
+        if s.regime_filter == "off":
+            return None
+        try:
+            r = check_regime(self.ind.candles[-REGIME_CANDLES:], s.regime_config())
+        except Exception as exc:  # never let the filter break the strategy; log-only data is just missing
+            self._emit("REGIME_FAILED", f"sideways filter failed: {exc}", Level.WARNING)
+            return None
+        return summarize(r, direction, s.regime_block_against_slope, s.regime_filter)  # type: ignore[arg-type]
 
     async def _rsi_exits(self, a: Setup, rsi: float, where: str) -> bool:
         """TP1 / TP2 (or the single RSI exit when TP is off). True if something was sold."""
@@ -510,6 +562,13 @@ class EmaRsiBreakout(Strategy):
         if expiry is None:
             a.state, a.result = "REJECTED", "no_expiry_available"
             return
+        a.regime_entry = self._regime(a.direction)
+        if a.regime_entry and a.regime_entry["would_block"] and s.regime_filter == "block":
+            a.state, a.result = "SKIPPED", "sideways_at_entry"
+            self._emit("REGIME_BLOCKED", f"setup #{a.no} {a.direction} entry skipped: {a.regime_entry['note']}",
+                       setup=a.no, regime=a.regime_entry)
+            self._persist()
+            return
         d = Direction(a.direction)
         lots1, lots2 = s.split()
         targets = ([PartialTarget(lbl, None, "above", n) for lbl, n in (("tp1", lots1), ("tp2", lots2)) if n > 0]
@@ -527,7 +586,8 @@ class EmaRsiBreakout(Strategy):
                                protective_sl_pct=s.protective_sl_pct or None, partial_targets=targets),
             meta={"setup_no": a.no, "underlying": s.underlying, "confirmation_candle": fmt_hm(a.candle_start),
                   "conf_high": a.conf_high, "conf_low": a.conf_low, "ema": self.ind.values["ema"],
-                  "rsi": self.ind.values["rsi"], "buffer": s.buffer},
+                  "rsi": self.ind.values["rsi"], "buffer": s.buffer,
+                  "regime": a.regime, "regime_entry": a.regime_entry},
         )
         info = await self.ctx.submit_entry(signal)
         if info is None:
@@ -558,9 +618,15 @@ class EmaRsiBreakout(Strategy):
         assert isinstance(new, EmaRsiBreakoutSettings)
         rebuild = (new.ema_length, new.rsi_length, new.candle_timeframe_min) != (
             self.settings.ema_length, self.settings.rsi_length, self.settings.candle_timeframe_min)
+        same_tf = new.candle_timeframe_min == self.settings.candle_timeframe_min
         self.settings = new
         if rebuild:
-            self.ind, self.last_start = Indicators(new), None  # warmed up again on the next start
+            old = self.ind.candles if same_tf else []
+            self.ind = Indicators(new)
+            for c in old:  # same candles, new lengths: stays warmed up
+                self.ind.update(c)
+            if not old:
+                self.last_start = None  # warmed up again on the next start
         else:
             self.ind.s = new
 

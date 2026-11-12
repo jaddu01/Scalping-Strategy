@@ -31,13 +31,14 @@
 {% else %}<tr><td colspan="9" class="muted">No closed trades in range.</td></tr>{% endfor %}</tbody></table></div>
 
 <div class="panel"><h2 style="margin-top:0">Trades</h2>
-<table class="sticky1"><thead><tr><th>Trade</th><th>Date</th><th>Instance</th><th>Broker</th><th>Mode</th><th>Slot</th><th>Dir</th><th>Symbol</th><th class="num">Qty</th><th>Signal</th><th class="num">Spot</th><th class="num">Entry</th><th class="num">Exit</th><th>Reason</th><th class="num">Gross</th><th class="num">Charges</th><th class="num">Net</th><th>Status</th></tr></thead>
+<table class="sticky1"><thead><tr><th>Trade</th><th>Date</th><th>Instance</th><th>Broker</th><th>Mode</th><th>Slot</th><th>Dir</th><th>Symbol</th><th class="num">Qty</th><th>Signal</th><th class="num">Spot</th><th class="num">Entry</th><th class="num">Exit</th><th>Reason</th><th title="sideways filter at entry (log-only unless the run blocks)">Regime</th><th class="num">Gross</th><th class="num">Charges</th><th class="num">Net</th><th>Status</th></tr></thead>
 <tbody>{% for t in rows %}<tr>
   <td><a href="/trades/{{ t.trade_ref }}">{{ t.trade_ref }}</a></td><td class="nowrap">{{ t.trade_date }}</td><td>{{ inst.get(t.instance_id, (t.meta or {}).get('deleted_instance', '–')) }}</td><td>{{ acc.get(t.account_id, '–') }}</td>
   <td><span class="badge {{ t.mode }}">{{ t.mode }}</span></td><td>{{ t.slot_id.split('#')[-1] if t.slot_id else '' }}</td><td>{{ t.direction }}</td><td class="small">{{ t.tradingsymbol }}</td>
   <td class="num">{{ t.quantity }}</td><td class="small nowrap">{{ t.signal_time|dt('%H:%M:%S') }}</td><td class="num">{{ t.signal_spot|money }}</td>
   <td class="num">{{ t.entry_price|money }}</td><td class="num">{{ t.exit_price|money }}</td><td class="small">{{ t.exit_reason or '' }}</td>
+  {% set rg = (t.meta or {}).get('regime_entry') or (t.meta or {}).get('regime') or {} %}<td class="small {{ 'neg' if rg.get('would_block') else 'muted' }}">{{ rg.get('note', '') }}</td>
   <td class="num {{ t.gross_pnl|pnlc }}">{{ t.gross_pnl|money }}</td><td class="num">{{ t.charges|money }}</td><td class="num {{ t.net_pnl|pnlc }}">{{ t.net_pnl|money }}</td>
   <td><span class="badge {{ t.status }}">{{ t.status }}</span></td></tr>
-{% else %}<tr><td colspan="18" class="muted">No trades match.</td></tr>{% endfor %}</tbody></table></div>
+{% else %}<tr><td colspan="19" class="muted">No trades match.</td></tr>{% endfor %}</tbody></table></div>
 {% endblock %}
