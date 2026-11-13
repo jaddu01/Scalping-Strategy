@@ -56,6 +56,19 @@ from core.clock import IST, now_ist, to_ist
 
 log = logging.getLogger("algo.broker.angelone")
 
+# instrument lists shared by all Angel accounts: path of the day's scrip master -> store (read-only after build)
+_SHARED_STORES: dict[str, InstrumentStore] = {}
+_SHARED_LOCKS: dict[tuple[int, str], asyncio.Lock] = {}
+
+
+def _shared_lock(key: str) -> asyncio.Lock:
+    k = (id(asyncio.get_running_loop()), key)  # a lock belongs to one event loop
+    lock = _SHARED_LOCKS.get(k)
+    if lock is None:
+        lock = _SHARED_LOCKS[k] = asyncio.Lock()
+    return lock
+
+
 SCRIP_MASTER_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
 ORDER_UPDATE_WS_URL = "wss://tns.angelone.in/smart-order-update"
 LOADED_SEGMENTS = {"NSE", "NFO", "BSE", "BFO"}
@@ -542,20 +555,37 @@ class AngelOneAdapter(BrokerAdapter):
 
     # ------------------------------------------------------------------ instruments
     async def load_instruments(self, force: bool = False) -> int:
+        """The day's scrip master, built once and shared by every Angel account (it is the same file for all
+        client codes; a copy per account ran the container out of memory on 13-Nov-2026 with 3 accounts)."""
         cache_dir = Path(self.cache_dir or ".")
         cache_dir.mkdir(parents=True, exist_ok=True)
         path = cache_dir / f"angel_scrip_master_{now_ist():%Y%m%d}.json"
-        if force or not path.exists():
-            async with httpx.AsyncClient(timeout=60) as client:
-                r = await client.get(SCRIP_MASTER_URL)
-                r.raise_for_status()
-                path.write_bytes(r.content)
-            for old in cache_dir.glob("angel_scrip_master_*.json"):
-                if old != path:
-                    old.unlink(missing_ok=True)
-        rows = await asyncio.to_thread(lambda: json.loads(path.read_text()))
-        self.store = await asyncio.to_thread(self._build_store, rows)
+        key = str(path.resolve())
+        async with _shared_lock(key):
+            store = None if force else _SHARED_STORES.get(key)
+            if store is None:
+                if force or not path.exists():
+                    async with httpx.AsyncClient(timeout=60) as client:
+                        r = await client.get(SCRIP_MASTER_URL)
+                        r.raise_for_status()
+                        path.write_bytes(r.content)
+                    for old in cache_dir.glob("angel_scrip_master_*.json"):
+                        if old != path:
+                            old.unlink(missing_ok=True)
+                store = await asyncio.to_thread(self._build_store_from_file, path)
+                for k in [k for k in _SHARED_STORES if k != key and Path(k).parent == path.parent.resolve()]:
+                    del _SHARED_STORES[k]  # yesterday's list
+                _SHARED_STORES[key] = store
+        self.store = store
         return len(self.store)
+
+    @classmethod
+    def _build_store_from_file(cls, path: Path) -> InstrumentStore:
+        rows = json.loads(path.read_text())
+        try:
+            return cls._build_store(rows)
+        finally:
+            del rows
 
     @staticmethod
     def _build_store(rows: list[dict[str, Any]]) -> InstrumentStore:

@@ -457,7 +457,7 @@ async def test_candle_close_mode_waits_for_the_close():
     assert ctx.exit_requests == [("T1", "tp1", "tp1")]
 
 
-async def test_pe_mid_candle_tp_at_live_rsi_32():
+async def test_pe_mid_candle_tp_at_live_rsi_32_then_20():
     ctx = warm_ctx(+2)
     strat = await start(ctx)
     t, px = await rally_until_setup(strat, ctx, step=-6.0)
@@ -466,9 +466,23 @@ async def test_pe_mid_candle_tp_at_live_rsi_32():
     p32 = _price_for_rsi(strat, 32, up=False)
     ctx.clock.set(t + timedelta(minutes=2))
     await strat.on_tick(tick(p32 + 0.05))
-    assert ctx.exit_requests == []
+    assert ctx.exit_requests == []  # live RSI just above 32
     await strat.on_tick(tick(p32))
     assert ctx.exit_requests == [("T1", "tp1", "tp1")]
+    p20 = _price_for_rsi(strat, 20, up=False)
+    await strat.on_tick(tick(p20 + 0.05))
+    assert len(ctx.exit_requests) == 1  # live RSI just above 20
+    await strat.on_tick(tick(p20))
+    assert ctx.exit_requests == [("T1", "tp1", "tp1"), ("T1", "tp2", "tp2")]
+
+
+def test_pe_levels_are_separate_from_ce():
+    s = EmaRsiBreakoutSettings()
+    assert (s.tp1_rsi, s.tp2_rsi, s.tp1_rsi_pe, s.tp2_rsi_pe) == (68, 80, 32, 20)
+    with pytest.raises(ValidationError, match="PE TP2 RSI level must be lower"):
+        EmaRsiBreakoutSettings(tp1_rsi_pe=25, tp2_rsi_pe=35)
+    with pytest.raises(ValidationError, match="below the middle level"):
+        EmaRsiBreakoutSettings(tp1_rsi_pe=55)
 
 
 # ---------------------------------------------------------------- trailing stop after TP1

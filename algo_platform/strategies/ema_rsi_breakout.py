@@ -10,6 +10,7 @@ Pine logic on 5-minute NIFTY spot candles:
 Exits on this platform (TP1 / TP2 replace the script's single RSI 70 exit):
   TP1            sell 40 % of the lots as soon as the live RSI reaches 68     (PE: RSI <= 32)
   TP2            sell 40 % more when the live RSI reaches 80                  (PE: RSI <= 20)
+                 a target RSI already reached at entry first has to come back and then reach it again
                  live RSI = RSI with the current tick as the forming candle's close (TradingView's real-time
                  value), so a target fires mid-candle; set "RSI targets checked on" to candle_close for the
                  Pine behaviour
@@ -39,6 +40,7 @@ from strategies.regime_filter import REGIME_CANDLES, RegimeSettings, blocks, reg
 from strategies.registry import register
 
 TRAIL_MIN_STEP = 0.5  # points; smaller moves of the trailing stop are not sent
+WARM_RETRY_FIRST, WARM_RETRY_MAX = 20.0, 300.0  # seconds between history retries while cold
 
 
 class EmaRsiBreakoutSettings(RegimeSettings):
@@ -75,12 +77,14 @@ class EmaRsiBreakoutSettings(RegimeSettings):
                             description="Open trades are closed by the final square-off (15:15)")
     tp_enabled: bool = Field(True, title="Use TP1 / TP2",
                              description="Off: the whole position exits at the RSI exit level (the script's rule)")
-    tp1_rsi: float = Field(68, gt=0, lt=100, title="TP1: RSI level (long)",
-                           description="Sell TP1 lots when RSI reaches this (live, mid-candle by default); "
-                                       "short trades use 100 − this (68 -> 32)")
+    tp1_rsi: float = Field(68, gt=0, lt=100, title="TP1: RSI level (CE)",
+                           description="Sell TP1 lots of a CE trade when RSI reaches this (live, mid-candle by default)")
     tp1_lots: int = Field(0, ge=0, le=200, title="TP1 lots", description="0 = automatic (40 % of Lots: 10 -> 4)")
-    tp2_rsi: float = Field(80, gt=0, lt=100, title="TP2: RSI level (long)",
-                           description="Short trades use 100 − this (80 -> 20)")
+    tp2_rsi: float = Field(80, gt=0, lt=100, title="TP2: RSI level (CE)")
+    tp1_rsi_pe: float = Field(32, gt=0, lt=100, title="TP1: RSI level (PE)",
+                              description="Sell TP1 lots of a PE trade when RSI falls to this or below")
+    tp2_rsi_pe: float = Field(20, gt=0, lt=100, title="TP2: RSI level (PE)",
+                              description="Sell TP2 lots of a PE trade when RSI falls to this or below")
     tp2_lots: int = Field(0, ge=0, le=200, title="TP2 lots", description="0 = automatic (40 % of Lots: 10 -> 4)")
     trail_after_tp1: bool = Field(
         True, title="Trail the stop after TP1",
@@ -129,9 +133,14 @@ class EmaRsiBreakoutSettings(RegimeSettings):
         for name, lvl in (("TP1", self.tp1_rsi), ("TP2", self.tp2_rsi), ("RSI exit", self.rsi_exit)):
             if lvl <= self.rsi_mid:
                 raise ValueError(f"{name} RSI level ({lvl:g}) must be above the middle level ({self.rsi_mid:g})")
+        for name, lvl in (("PE TP1", self.tp1_rsi_pe), ("PE TP2", self.tp2_rsi_pe)):
+            if lvl >= self.rsi_mid:
+                raise ValueError(f"{name} RSI level ({lvl:g}) must be below the middle level ({self.rsi_mid:g})")
         if self.tp_enabled:
             if self.tp2_rsi <= self.tp1_rsi:
                 raise ValueError("TP2 RSI level must be greater than TP1 RSI level")
+            if self.tp2_rsi_pe >= self.tp1_rsi_pe:
+                raise ValueError("PE TP2 RSI level must be lower than PE TP1 RSI level")
             if (self.tp1_lots == 0) != (self.tp2_lots == 0):
                 raise ValueError("set both TP1 lots and TP2 lots to 0 (automatic split) or both to a number of lots")
             a, b = self.split()
@@ -172,6 +181,7 @@ class Setup:
     trail_stop: float | None = None  # current trailed stop, once moved
     regime: dict[str, Any] | None = None  # sideways filter when the setup armed
     regime_entry: dict[str, Any] | None = None  # ... and when the breakout fired
+    tp_wait: list[str] = field(default_factory=list)  # targets RSI was already past at entry: must come back first
 
     @property
     def slot_id(self) -> str:
@@ -262,6 +272,9 @@ class EmaRsiBreakout(Strategy):
         self.setups: list[Setup] = []
         self.last_start: datetime | None = None
         self._saved: Any = None
+        self.cold = False  # history did not load: no setups / strategy exits until it does
+        self._warm_retry_at: datetime | None = None
+        self._warm_wait = WARM_RETRY_FIRST
 
     # ---- helpers
     @property
@@ -320,16 +333,40 @@ class EmaRsiBreakout(Strategy):
         now = self.ctx.now()
         self.day = now.date()
         self._load(self.day)
-        hist = await self.ctx.history(self.spot, self.settings.candle_timeframe_min, self.settings.warmup_candles)
-        for c in hist:
-            self.ind.update(c)
-            self.last_start = c.start
-        if hist:
-            self._emit("WARMUP", f"indicators warmed up on {len(hist)} candles: EMA={self.ind.values['ema']} "
-                                 f"RSI={self.ind.values['rsi']}", Level.DEBUG, candles=len(hist))
-        else:
-            self._emit("WARMUP_EMPTY", "no history: EMA / RSI start from the next candles (signals may be late)",
-                       Level.WARNING)
+        await self._try_warm_up(now, first=True)
+
+    def _min_history(self) -> int:
+        s = self.settings
+        return 3 * max(s.ema_length, s.rsi_length, 14)
+
+    async def _try_warm_up(self, now: datetime, first: bool = False) -> bool:
+        """Load history into fresh indicators. Too little history (broker error, rate limit) leaves the strategy
+        cold: it then retries with a growing pause and arms nothing until it has the real EMA / RSI. On 13-Nov-2026
+        two runs traded on indicators built from that day's candles only and took signals the chart never showed."""
+        try:
+            hist = await self.ctx.history(self.spot, self.settings.candle_timeframe_min, self.settings.warmup_candles)
+        except Exception:
+            hist = []
+        if len(hist) >= self._min_history():
+            ind = Indicators(self.settings)
+            for c in hist:
+                ind.update(c)
+            self.ind, self.last_start = ind, hist[-1].start
+            if self.cold:
+                self._emit("WARMUP", f"history loaded on retry ({len(hist)} candles): EMA={ind.values['ema']:.2f} "
+                                     f"RSI={ind.values['rsi']:.2f}; setups resume", Level.WARNING, candles=len(hist))
+            else:
+                self._emit("WARMUP", f"indicators warmed up on {len(hist)} candles: EMA={ind.values['ema']} "
+                                     f"RSI={ind.values['rsi']}", Level.DEBUG, candles=len(hist))
+            self.cold, self._warm_wait = False, WARM_RETRY_FIRST
+            return True
+        if first or not self.cold:
+            self._emit("WARMUP_EMPTY", f"history not available ({len(hist)} candles, need {self._min_history()}): "
+                                       f"no setups until it loads; retrying", Level.WARNING)
+        self.cold = True
+        self._warm_retry_at = now + timedelta(seconds=self._warm_wait)
+        self._warm_wait = min(self._warm_wait * 2, WARM_RETRY_MAX)
+        return False
 
     def restore(self, trades: list[TradeInfo]) -> None:
         by_slot = {t.slot_id: t for t in trades}
@@ -352,6 +389,8 @@ class EmaRsiBreakout(Strategy):
         a = self.active
         if a is not None and a.state == "PENDING" and now >= combine(now.date(), self.settings.entry_end):
             a.state, a.result = "EXPIRED", "entry_window_closed"
+        if self.cold and self.spot is not None and (self._warm_retry_at is None or now >= self._warm_retry_at):
+            await self._try_warm_up(now)
         self.maybe_apply_pending()
         self._persist()
 
@@ -376,8 +415,8 @@ class EmaRsiBreakout(Strategy):
         self.ind.update(candle)
         self.last_start = candle.start
         close_time = candle.start + timedelta(minutes=s.candle_timeframe_min)
-        if not self.ind.ready():
-            return
+        if not self.ind.ready() or self.cold:
+            return  # cold: EMA / RSI are not the chart's yet, so no exits or setups are decided on them
         ema, rsi = self.ind.values["ema"], self.ind.values["rsi"]
         a = self.active
         # 1. exits decided on candle close
@@ -442,13 +481,20 @@ class EmaRsiBreakout(Strategy):
         s = self.settings
         is_long = a.direction == "CE_BUY"
 
-        def reached(level: float) -> bool:
+        def reached(level: float) -> bool:  # `level` is the CE level; PE mirrors it (70 -> 30)
             return rsi >= level if is_long else rsi <= 100 - level
 
         if s.tp_enabled:
             fired = False
-            for label, level in (("tp1", s.tp1_rsi), ("tp2", s.tp2_rsi)):
-                if label not in a.tp_done and reached(level) and self._target_lots(label):
+            targets = ((("tp1", s.tp1_rsi), ("tp2", s.tp2_rsi)) if is_long else
+                       (("tp1", s.tp1_rsi_pe), ("tp2", s.tp2_rsi_pe)))
+            for label, level in targets:
+                hit = rsi >= level if is_long else rsi <= level
+                if label in a.tp_wait:
+                    if not hit:
+                        a.tp_wait.remove(label)  # RSI came back: the target is live from now on
+                    continue
+                if label not in a.tp_done and hit and self._target_lots(label):
                     a.tp_done.append(label)
                     fired = True
                     self._emit("TP_SIGNAL", f"{label.upper()} RSI={rsi:.2f} ({where}) setup #{a.no}", setup=a.no,
@@ -494,6 +540,24 @@ class EmaRsiBreakout(Strategy):
             self.ctx.tighten_stop(a.trade_id, level)
             self._persist()
 
+    def _targets_reached(self, a: Setup, spot: float) -> list[str]:
+        """TP levels the live RSI is already past at entry (e.g. a PE entered at RSI 24 with TP1 at 32). Selling
+        those at once only pays charges, so they wait until RSI comes back and reaches them again."""
+        s = self.settings
+        if not s.tp_enabled:
+            return []
+        rsi = self.ind.rsi.peek(spot)
+        rsi = self.ind.values["rsi"] if rsi is None else rsi
+        if rsi is None:
+            return []
+        is_long = a.direction == "CE_BUY"
+        levels = (("tp1", s.tp1_rsi), ("tp2", s.tp2_rsi)) if is_long else (("tp1", s.tp1_rsi_pe), ("tp2", s.tp2_rsi_pe))
+        late = [lbl for lbl, lvl in levels if (rsi >= lvl if is_long else rsi <= lvl)]
+        if late:
+            self._emit("TP_WAIT", f"setup #{a.no} RSI={rsi:.2f} already past {', '.join(x.upper() for x in late)} "
+                                  f"at entry: they wait until RSI comes back", setup=a.no, rsi=rsi, targets=late)
+        return late
+
     def _target_lots(self, label: str) -> int:
         a, b = self.settings.split()
         return a if label == "tp1" else b
@@ -507,6 +571,8 @@ class EmaRsiBreakout(Strategy):
             return
         s = self.settings
         if a.state == "IN_TRADE":
+            if self.cold:
+                return  # the engine still watches the spot stop-loss and the hard exit
             # mid-candle TP: the live RSI with this tick as the forming candle's close
             if s.rsi_exit_on == "tick" and a.trade_id and not a.exit_requested:
                 rsi = self.ind.rsi.peek(tick.ltp)
@@ -568,6 +634,7 @@ class EmaRsiBreakout(Strategy):
             a.state, a.result = "REJECTED", "signal_rejected"
         else:
             a.trade_id, a.best = info.trade_id, spot
+            a.tp_wait = self._targets_reached(a, spot)
             a.state = "IN_TRADE" if info.status == "OPEN" else "DONE"
             if info.status != "OPEN":
                 a.result = info.exit_reason or "entry_failed"
@@ -626,4 +693,4 @@ class EmaRsiBreakout(Strategy):
                                "rsi": round(v["rsi"], 2) if v["rsi"] is not None else None,
                                "candle": fmt_hm(self.ind.last.start) if self.ind.last else None,
                                "close": self.ind.last.close if self.ind.last else None},
-                "pending_settings": self.has_pending_settings}
+                "pending_settings": self.has_pending_settings, "cold": self.cold}

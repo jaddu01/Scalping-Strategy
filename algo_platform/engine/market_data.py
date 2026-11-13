@@ -83,6 +83,7 @@ class MarketDataService:
         self._recent_locks: dict[tuple[str, int], asyncio.Lock] = {}
         self._recent_warm: set[tuple[str, int]] = set()
         self._recent_reload: dict[tuple[str, int], datetime] = {}
+        self.history_retry_delays: tuple[float, ...] = (1.5, 4.0)  # seconds between history attempts
         self._raw_listeners: list[Callable[[str, InstrumentKey, Tick], None]] = []
         self._stale_reported = False
         self._attached_at: datetime | None = None
@@ -382,12 +383,20 @@ class MarketDataService:
         now = self.clock.now()
         trading_days = -(-count * timeframe_min // 375) + 1
         start = now - timedelta(days=trading_days * 2 + 4)  # room for weekends and holidays
-        try:
-            feed_inst = self.feed.resolve_symbol(key_of(inst))
-            rows = await self.feed.get_historical_candles(feed_inst, timeframe_min, start, now)
-        except Exception as exc:
-            self._emit("HISTORICAL_FETCH_FAILED", f"history {inst.tradingsymbol} {timeframe_min}m: {exc}", Level.WARNING)
-            return []
+        rows = None
+        for attempt, wait in enumerate((*self.history_retry_delays, None), start=1):
+            try:
+                feed_inst = self.feed.resolve_symbol(key_of(inst))
+                rows = await self.feed.get_historical_candles(feed_inst, timeframe_min, start, now)
+                break
+            except Exception as exc:
+                # Angel answers "exceeding access rate" when many requests arrive together: wait and ask again
+                last = wait is None
+                self._emit("HISTORICAL_FETCH_FAILED", f"history {inst.tradingsymbol} {timeframe_min}m (attempt "
+                           f"{attempt}): {exc}" + ("" if last else f"; retrying in {wait:g}s"), Level.WARNING)
+                if last:
+                    return []
+                await asyncio.sleep(wait)
         done = sorted((c for c in rows if c.start + timedelta(minutes=timeframe_min) <= now), key=lambda c: c.start)
         return done[-count:]
 

@@ -46,7 +46,10 @@ class BreachAction(str, Enum):
 class GlobalRisk(_M):
     max_daily_loss: float = Field(0.0, ge=0, title="Max daily loss (₹, 0 = off)")
     max_daily_profit: float = Field(0.0, ge=0, title="Max daily profit (₹, 0 = off)")
-    max_open_positions: int = Field(5, ge=1, le=100, title="Max open positions (all instances)")
+    max_open_positions: int = Field(25, ge=1, le=100, title="Max open positions (whole platform)",
+                                    description="Counts every partner's open trades together; each broker account "
+                                                "also has its own limit. 5 blocked a partner's signal on 13-Nov-2026 "
+                                                "with 21 runs across 3 partners")
     on_breach: BreachAction = Field(BreachAction.SQUARE_OFF, title="On daily loss/profit breach")
     warn_at_pct: float = Field(80.0, ge=10, le=100, title="Warn at % of limit")
 

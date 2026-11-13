@@ -32,7 +32,7 @@ services:
       - "127.0.0.1:8100:8000"
     networks:
       - shared
-    mem_limit: 600m
+    mem_limit: 1000m  # 3 Angel accounts did not fit in 600m (OOM-killed 6 times on 13-Nov-2026)
     stop_grace_period: 30s
     logging:
       driver: json-file
