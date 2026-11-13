@@ -79,7 +79,20 @@ def _asset_version() -> str:
 
 
 templates.env.globals["asset_v"] = _asset_version()
+def _regime_short(note: Any) -> str:
+    """Table label for a sideways-filter note: "ok", "would block (2)" or "BLOCK (3)"; the full note goes in a tooltip."""
+    note = str(note or "")
+    if not note:
+        return ""
+    if note.startswith("ok"):
+        return "ok"
+    head, _, reasons = note.partition(":")
+    n = len([r for r in reasons.split(";") if r.strip()])
+    return f"{head.strip()} ({n})" if n else head.strip()
+
+
 templates.env.filters["dt"] = _fmt_dt
+templates.env.filters["regime_short"] = _regime_short
 templates.env.filters["money"] = _money
 templates.env.filters["pnlc"] = _pnl_class
 templates.env.filters["tojson_pretty"] = lambda v: json.dumps(v, indent=2, default=str, ensure_ascii=False)

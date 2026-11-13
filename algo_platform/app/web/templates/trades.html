@@ -37,7 +37,7 @@
   <td><span class="badge {{ t.mode }}">{{ t.mode }}</span></td><td>{{ t.slot_id.split('#')[-1] if t.slot_id else '' }}</td><td>{{ t.direction }}</td><td class="small">{{ t.tradingsymbol }}</td>
   <td class="num">{{ t.quantity }}</td><td class="small nowrap">{{ t.signal_time|dt('%H:%M:%S') }}</td><td class="num">{{ t.signal_spot|money }}</td>
   <td class="num">{{ t.entry_price|money }}</td><td class="num">{{ t.exit_price|money }}</td><td class="small">{{ t.exit_reason or '' }}</td>
-  {% set rg = (t.meta or {}).get('regime_entry') or (t.meta or {}).get('regime') or {} %}<td class="small {{ 'neg' if rg.get('would_block') else 'muted' }}">{{ rg.get('note', '') }}</td>
+  {% set rg = (t.meta or {}).get('regime_entry') or (t.meta or {}).get('regime') or {} %}<td class="small nowrap {{ 'neg' if rg.get('would_block') else 'muted' }}" title="{{ rg.get('note', '') }}">{{ rg.get('note')|regime_short }}</td>
   <td class="num {{ t.gross_pnl|pnlc }}">{{ t.gross_pnl|money }}</td><td class="num">{{ t.charges|money }}</td><td class="num {{ t.net_pnl|pnlc }}">{{ t.net_pnl|money }}</td>
   <td><span class="badge {{ t.status }}">{{ t.status }}</span></td></tr>
 {% else %}<tr><td colspan="19" class="muted">No trades match.</td></tr>{% endfor %}</tbody></table></div>

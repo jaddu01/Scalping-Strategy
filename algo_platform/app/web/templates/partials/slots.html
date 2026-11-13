@@ -26,7 +26,7 @@
         <td class="num {{ v.pnl|pnlc if v else '' }}">{% if v %}{{ v.pnl|money }}{% if v.live %} <span class="small muted">MTM</span>{% endif %}{% endif %}</td>
         <td>{% if s.trade_id %}<a href="/trades/{{ s.trade_id }}">{{ s.trade_id }}</a>{% endif %}</td>
         <td class="small">{{ (s.result or '')|replace('_', ' ') }}</td>
-        <td class="small {{ 'neg' if s.regime_block else 'muted' }}">{{ s.regime or '' }}</td></tr>
+        <td class="small nowrap {{ 'neg' if s.regime_block else 'muted' }}" title="{{ s.regime or '' }}">{{ s.regime|regime_short }}</td></tr>
     {% endfor %}
     </tbody>
     {% if totals and totals.trades %}
@@ -60,7 +60,7 @@
         <td class="num {{ v.pnl|pnlc if v else '' }}">{% if v %}{{ v.pnl|money }}{% if v.live %} <span class="small muted">MTM</span>{% endif %}{% endif %}</td>
         <td>{% if s.trade_id %}<a href="/trades/{{ s.trade_id }}">{{ s.trade_id }}</a>{% endif %}</td>
         <td class="small">{{ s.result or '' }}{% if v and v.exit_time and not v.live %}<br><span class="muted">{{ v.exit_time|dt('%H:%M:%S') }}</span>{% endif %}</td>
-        <td class="small {{ 'neg' if s.regime_block else 'muted' }}">{{ s.regime or '' }}</td></tr>
+        <td class="small nowrap {{ 'neg' if s.regime_block else 'muted' }}" title="{{ s.regime or '' }}">{{ s.regime|regime_short }}</td></tr>
       {% if v and v.legs %}
       <tr class="legs"><td></td><td colspan="16" class="small muted">
         {% for leg in v.legs %}{{ leg.label }} {{ leg.lots }} lot{{ 's' if leg.lots != 1 }} @ spot {{ leg.spot|money }}{% if leg.points is not none %} ({{ '%+.2f'|format(leg.points) }} pts){% endif %}, premium {{ leg.premium|money }}{{ ' · ' if not loop.last }}{% endfor %}
@@ -101,7 +101,7 @@
         <td class="num {{ v.pnl|pnlc if v else '' }}">{% if v %}{{ v.pnl|money }}{% if v.live %} <span class="small muted">MTM</span>{% endif %}{% endif %}</td>
         <td>{% if s.trade_id %}<a href="/trades/{{ s.trade_id }}">{{ s.trade_id }}</a>{% endif %}</td>
         <td class="small">{{ s.result or '' }}{% if v and v.exit_time and not v.live %}<br><span class="muted">{{ v.exit_time|dt('%H:%M:%S') }}</span>{% endif %}</td>
-        <td class="small {{ 'neg' if s.regime_block else 'muted' }}">{{ s.regime or '' }}</td></tr>
+        <td class="small nowrap {{ 'neg' if s.regime_block else 'muted' }}" title="{{ s.regime or '' }}">{{ s.regime|regime_short }}</td></tr>
       {% if v and v.legs %}
       <tr class="legs"><td></td><td colspan="17" class="small muted">
         {% for leg in v.legs %}{{ leg.label }} {{ leg.lots }} lot{{ 's' if leg.lots != 1 }} @ spot {{ leg.spot|money }}{% if leg.points is not none %} ({{ '%+.2f'|format(leg.points) }} pts){% endif %}, premium {{ leg.premium|money }}{{ ' · ' if not loop.last }}{% endfor %}
