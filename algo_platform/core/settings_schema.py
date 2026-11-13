@@ -116,7 +116,7 @@ class RecorderSettings(_M):
                           description="Saves every tick of the index and its ATM ± N option strikes during market "
                                       "hours, plus the strikes' real 1-minute candles after the close — for exact "
                                       "backtests and replays later")
-    underlyings: list[str] = Field(default_factory=lambda: ["NIFTY"], title="Indices to record",
+    underlyings: list[str] = Field(default_factory=lambda: ["NIFTY", "BANKNIFTY", "SENSEX"], title="Indices to record",
                                    description="Comma separated, e.g. NIFTY, BANKNIFTY, SENSEX")
     strikes_each_side: int = Field(5, ge=0, le=20, title="Strikes each side of ATM",
                                    description="5 = ATM ± 5 strikes, CE and PE (22 options); re-centred as the index moves")

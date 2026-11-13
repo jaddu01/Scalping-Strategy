@@ -1,5 +1,41 @@
 {% if not rt %}
   <p class="muted">The instance is not running. Enable it to see today's slots.</p>
+{% elif rt.strategy.smc is defined %}
+  {% set m = rt.strategy.smc %}
+  {% if rt.strategy.pending_settings %}<div class="flash ok small">New parameters are queued and will apply when no setup or trade is active.</div>{% endif %}
+  {% if rt.strategy.cold %}<div class="flash err small">Waiting for history: no setups until the trend can be read (retrying).</div>{% endif %}
+  <p class="small muted">Trend ({{ m.trend_tf }}m): <span class="badge {{ 'RUNNING' if m.trend in ('bull', 'bear') else 'grey' }}">{{ m.trend|upper }}</span>
+    · range {{ m.range_low|money }} – {{ m.range_high|money }} · equilibrium {{ m.equilibrium|money }}
+    · last {{ m.entry_tf }}m candle {{ m.last or '–' }} close {{ m.close|money }} · ATR {{ m.atr if m.atr is not none else '–' }}</p>
+  {% if not rt.strategy.setups %}<p class="muted">No liquidity sweep in the trend direction yet today.</p>{% else %}
+  <table class="slots cards-sm">
+    <thead><tr><th class="c-title">#</th><th>Sweep</th><th>Dir</th><th>Swept level</th><th class="num">MSS level</th><th>Zone</th><th>State</th>
+      <th class="num">Entry</th><th class="num">SL</th><th class="num">Target</th><th class="num" title="NIFTY points in the trade's favour">Points</th>
+      <th class="num">Premium</th><th class="num">P&amp;L</th><th>Trade</th><th>Result</th><th title="sideways filter at the entry">Regime</th></tr></thead>
+    <tbody>
+    {% for s in rt.strategy.setups %}
+      {% set v = views.get(s.trade_id, {}) if s.trade_id else {} %}
+      <tr><td>{{ s.no }}</td><td class="nowrap">{{ s.time }} @ {{ s.sweep|money }}</td><td>{{ s.direction }}</td>
+        <td class="small">{{ s.level_kind|replace('_', ' ') }} {{ s.level|money }}</td><td class="num">{{ s.mss_level|money }}</td>
+        <td class="small nowrap">{{ s.zone or '' }}</td>
+        <td><span class="badge {{ 'IN_TRADE' if s.state == 'IN_TRADE' else ('RUNNING' if s.state in ('SWEPT', 'ARMING', 'ZONE') else 'grey') }}">{{ s.state }}</span></td>
+        <td class="num">{{ s.entry|money }}{% if s.entry_time %}<div class="small muted">{{ s.entry_time }}</div>{% endif %}</td>
+        <td class="num nowrap">{{ s.stop|money }}{% if s.be %} <span class="small muted">→ BE</span>{% endif %}</td><td class="num">{{ s.target|money }}</td>
+        <td class="num {{ v.points|pnlc if v else '' }}">{% if v and v.points is not none %}<b>{{ '%+.2f'|format(v.points) }}</b>{% elif v %}–{% endif %}</td>
+        <td class="num nowrap">{% if v %}{{ v.entry_premium|money }} → {{ v.exit_premium|money }}{% endif %}</td>
+        <td class="num {{ v.pnl|pnlc if v else '' }}">{% if v %}{{ v.pnl|money }}{% if v.live %} <span class="small muted">MTM</span>{% endif %}{% endif %}</td>
+        <td>{% if s.trade_id %}<a href="/trades/{{ s.trade_id }}">{{ s.trade_id }}</a>{% endif %}</td>
+        <td class="small">{{ (s.result or '')|replace('_', ' ') }}</td>
+        <td class="small {{ 'neg' if s.regime_block else 'muted' }}">{{ s.regime or '' }}</td></tr>
+    {% endfor %}
+    </tbody>
+    {% if totals and totals.trades %}
+    <tfoot><tr><th colspan="10">Today: {{ totals.trades }} trade{{ 's' if totals.trades != 1 }}</th>
+      <th class="num {{ totals.points|pnlc }}">{{ '%+.2f'|format(totals.points) }}</th><th></th>
+      <th class="num {{ totals.pnl|pnlc }}">{{ totals.pnl|money }}</th><th colspan="3"></th></tr></tfoot>
+    {% endif %}
+  </table>
+  {% endif %}
 {% elif rt.strategy.signals is defined %}
   {% set ind = rt.strategy.indicators %}
   {% if rt.strategy.pending_settings %}<div class="flash ok small">New parameters are queued and will apply when no setup or trade is active.</div>{% endif %}

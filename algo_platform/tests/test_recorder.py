@@ -11,8 +11,9 @@ from tests.conftest import DAY, at, make_candle
 from tests.engine_harness import build_env
 
 
-def make(env, tmp_path) -> TickRecorder:
+def make(env, tmp_path, underlyings=("NIFTY",)) -> TickRecorder:
     p = env.platform
+    p.settings.recorder.underlyings = list(underlyings)
     return TickRecorder(p.market, p.calendar, env.clock, p.bus, lambda: p.settings, tmp_path / "rec")
 
 
@@ -136,3 +137,22 @@ def test_recordings_panel_and_download(tmp_path):
         assert r.status_code == 200 and gzip.decompress(r.content).startswith(b"ts_ms")
         assert c.get("/recordings/2026-11-11/..%2F..%2Fw.db").status_code == 404
         assert c.get("/recordings/notaday/manifest.json").status_code == 404
+
+
+def test_default_records_nifty_banknifty_sensex():
+    from core.settings_schema import RecorderSettings
+
+    assert RecorderSettings().underlyings == ["NIFTY", "BANKNIFTY", "SENSEX"]
+
+
+async def test_an_index_missing_from_the_broker_does_not_stop_the_others(tmp_path):
+    env = await build_env(tmp_path)
+    try:
+        rec = make(env, tmp_path, ("BANKNIFTY", "NIFTY"))  # the mock broker lists no BANKNIFTY
+        env.spot(23660.0)
+        await env.settle()
+        await rec.step()
+        assert rec.centres.get("NIFTY") == 23650 and "BANKNIFTY" not in rec.centres
+        assert sum(k.startswith("NFO:NIFTY:") for k in rec.keys) == 22
+    finally:
+        await env.platform.stop()
