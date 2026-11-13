@@ -14,12 +14,43 @@
   const ago = (iso) => { if (!iso) return "never"; const s = Math.round((Date.now() - new Date(iso)) / 1000); return s < 60 ? s + "s ago" : s < 3600 ? Math.round(s / 60) + "m ago" : Math.round(s / 3600) + "h ago"; };
   const mmss = (s) => { s = Math.max(0, Math.round(s)); const m = Math.floor(s / 60); return m + ":" + String(s % 60).padStart(2, "0"); };
 
+  // loading: the bar at the top of the page shows while any request is running
+  let busyCount = 0;
+  const busy = (d) => { busyCount = Math.max(0, busyCount + d); document.body.classList.toggle("busy", busyCount > 0); };
+  async function withBusy(fn, btn) {
+    busy(1); btn?.classList.add("busy");
+    try { return await fn(); } finally { busy(-1); btn?.classList.remove("busy"); }
+  }
   async function api(path, body) {
-    const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf() }, body: JSON.stringify(body || {}), credentials: "same-origin" });
-    let data = {}; try { data = await r.json(); } catch (e) { /* empty */ }
-    return { status: r.status, ok: r.ok, data };
+    const el = document.activeElement;
+    const btn = el && el.tagName === "BUTTON" ? el : null;  // the clicked button shows a spinner too
+    return withBusy(async () => {
+      const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf() }, body: JSON.stringify(body || {}), credentials: "same-origin" });
+      let data = {}; try { data = await r.json(); } catch (e) { /* empty */ }
+      return { status: r.status, ok: r.ok, data };
+    }, btn);
   }
   window.algoApi = api;
+  // HTMX requests show the bar too, except background refreshes ("every 3s" polling)
+  document.addEventListener("htmx:beforeRequest", (ev) => {
+    const trig = ev.detail.elt?.getAttribute("hx-trigger") || "";
+    if (/\bevery\b/.test(trig) && ev.detail.requestConfig?.triggeringEvent?.type !== "load") return;
+    ev.detail.xhr.algoBusy = true; busy(1);
+  });
+  document.addEventListener("htmx:afterRequest", (ev) => { if (ev.detail.xhr?.algoBusy) { ev.detail.xhr.algoBusy = false; busy(-1); } });
+  // a form that reloads the page: show the bar and a spinner on its button until the next page arrives
+  document.addEventListener("submit", (ev) => {
+    if (ev.target.hasAttribute("hx-post") || ev.target.hasAttribute("hx-get")) return;
+    setTimeout(() => {
+      if (ev.defaultPrevented) return;
+      const btn = ev.submitter; busy(1); btn?.classList.add("busy");
+      setTimeout(() => { busy(-1); btn?.classList.remove("busy"); }, 20000);  // never stuck if no new page comes
+    }, 0);
+  });
+  window.addEventListener("pageshow", () => { busyCount = 0; busy(0); $$("button.busy").forEach((b) => b.classList.remove("busy")); });
+
+  // dashboard day: null = today (live); otherwise the P&L figures come from /api/day for that date
+  let viewDay = null, dayData = null;
 
   // ------------------------------------------------------------------ responsive helpers
   // the menu button (narrow screens)
@@ -167,7 +198,10 @@
   }
   function renderDashboard(s) {
     const root = $("#dashboard"); if (!root) return;
-    const t = s.totals || {};
+    const past = viewDay !== null;
+    const t = past ? (dayData ? dayData.total : {}) : (s.totals || {});
+    const instPnl = (i) => past ? ((dayData && dayData.instances[String(i.id)]) || { trades: 0, gross: 0, net: 0 }) : i;
+    const accPnl = (a) => past ? ((dayData && dayData.accounts[String(a.id)]) || {}) : (a.pnl || {});
     $("#tot-gross").innerHTML = `<span class="${pc(t.gross)}">${num(t.gross)}</span>`;
     $("#tot-net").innerHTML = `<span class="${pc(t.net)}">${num(t.net)}</span>`;
     $("#tot-trades").textContent = t.trades ?? 0;
@@ -179,8 +213,8 @@
       <td><a href="/strategies/${i.id}">${esc(i.name)}</a>${i.pending_settings ? ' <span class="badge amber" title="new parameters apply from the next slot">pending params</span>' : ""}</td>
       <td><span class="badge ${esc(i.status)}">${esc(i.status === "RUNNING" ? "RUNNING" : i.status)}</span> <span class="muted small">${esc(i.message || "")}</span></td>
       <td><span class="badge ${esc(i.mode)}">${esc(i.mode.toUpperCase())}</span></td>
-      <td>${esc(i.owner || "-")}</td><td>${esc(i.account)}</td><td class="num">${i.trades}</td>
-      <td class="num ${pc(i.gross)}">${num(i.gross)}</td><td class="num ${pc(i.net)}">${num(i.net)}</td>
+      <td>${esc(i.owner || "-")}</td><td>${esc(i.account)}</td><td class="num">${instPnl(i).trades ?? 0}</td>
+      <td class="num ${pc(instPnl(i).gross)}">${num(instPnl(i).gross)}</td><td class="num ${pc(instPnl(i).net)}">${num(instPnl(i).net)}</td>
       <td>${canControl(i.owner_id) && i.enabled ? `<button class="small danger" data-kill="instance" data-id="${i.id}" data-name="${esc(i.name)}">Kill</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="10" class="muted">No strategy instances yet — <a href="/strategies/new">create one</a>.</td></tr>`;
     // positions
     $("#pos-body").innerHTML = (s.positions || []).map((p) => `<tr data-exit="${esc(p.exit_at)}">
@@ -202,7 +236,7 @@
     $("#acc-body").innerHTML = (s.accounts || []).map((a) => `<tr><td><span class="dot ${esc(a.indicator)}"></span></td>
       <td><a href="/accounts">${esc(a.label)}</a>${a.is_feed ? ' <span class="badge paper">data feed</span>' : ""}${a.kill_switch ? ' <span class="badge red">KILLED</span>' : ""}</td>
       <td>${esc(a.owner || "-")}</td><td>${esc(a.status)}</td><td class="num">${num(a.funds)}</td>
-      <td class="num ${pc((a.pnl || {}).gross)}">${num((a.pnl || {}).gross)}</td><td class="num ${pc((a.pnl || {}).net)}">${num((a.pnl || {}).net)}</td>
+      <td class="num ${pc(accPnl(a).gross)}">${num(accPnl(a).gross)}</td><td class="num ${pc(accPnl(a).net)}">${num(accPnl(a).net)}</td>
       <td class="small">${a.is_feed ? "tick " + esc(ago(a.last_tick_at)) + "<br>" : ""}sync ${esc(ago(a.last_order_sync_at))}</td></tr>`).join("") || `<tr><td colspan="8" class="muted">No broker accounts — <a href="/accounts">add one</a>.</td></tr>`;
   }
   function applyState(s) {
@@ -218,6 +252,56 @@
 
   const initial = $("#initial-state");
   if (initial) { try { const s = JSON.parse(initial.textContent); if (s) applyState(s); } catch (e) { /* ignore */ } }
+
+  // ------------------------------------------------------------------ dashboard day filter
+  const dayInput = $("#dash-day");
+  if (dayInput) {
+    const today = dayInput.dataset.today;
+    const fmtDay = (d) => { const [y, m, dd] = d.split("-").map(Number); return new Date(y, m - 1, dd).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }); };
+    const shift = (d, n) => {  // the next / previous weekday
+      const [y, m, dd] = d.split("-").map(Number); const x = new Date(Date.UTC(y, m - 1, dd));
+      do { x.setUTCDate(x.getUTCDate() + n); } while (x.getUTCDay() === 0 || x.getUTCDay() === 6);
+      return x.toISOString().slice(0, 10);
+    };
+    const setLoading = (on) => $$(".day-data").forEach((el) => el.classList.toggle("loading", on));
+    function dayUi() {
+      const d = viewDay || today, label = viewDay ? fmtDay(viewDay) : null;
+      dayInput.value = d;
+      $$(".day-label").forEach((el) => { el.textContent = label || "Today's"; });
+      $$(".day-label-lc").forEach((el) => { el.textContent = label || "today"; });
+      const link = $("#day-trades-link"); if (link) link.href = `/trades?day_from=${d}&day_to=${d}`;
+      $("#day-next").disabled = !viewDay; $("#day-today").disabled = !viewDay;
+      const note = $("#day-note");
+      note.hidden = !viewDay;
+      if (viewDay) note.textContent = `Showing P&L and trades for ${label}. Status, on/off switches and open positions are live (now).`;
+      const url = new URL(location.href);
+      if (viewDay) url.searchParams.set("date", viewDay); else url.searchParams.delete("date");
+      history.replaceState(null, "", url);
+    }
+    async function loadDay(d) {
+      if (!d || d >= today) {
+        viewDay = null; dayData = null; setLoading(false); dayUi(); if (lastState) applyState(lastState); return;
+      }
+      viewDay = d; dayData = null; dayUi(); setLoading(true);
+      try {
+        const r = await withBusy(() => fetch("/api/day?date=" + encodeURIComponent(d), { credentials: "same-origin" }));
+        const j = await r.json().catch(() => ({}));
+        if (viewDay !== d) return;  // another day was picked meanwhile
+        if (!r.ok) throw new Error(j.detail || r.status);
+        dayData = j.summary;
+      } catch (e) {
+        if (viewDay === d) toast(`Could not load ${fmtDay(d)}: ${e.message}`, "ERROR");
+      } finally {
+        if (viewDay === d) { setLoading(false); if (lastState) applyState(lastState); }
+      }
+    }
+    dayInput.addEventListener("change", () => loadDay(dayInput.value));
+    $("#day-prev").addEventListener("click", () => loadDay(shift(viewDay || today, -1)));
+    $("#day-next").addEventListener("click", () => loadDay(shift(viewDay, 1)));
+    $("#day-today").addEventListener("click", () => loadDay(null));
+    const start = new URLSearchParams(location.search).get("date");
+    if (start && start < today) loadDay(start); else dayUi();
+  }
 
   // ------------------------------------------------------------------ log stream
   const logbox = $("#logbox");
@@ -255,7 +339,7 @@
     if (!logbox) return;
     const f = logFilter(); const qs = new URLSearchParams(f); qs.set("limit", "1000");
     const df = $("#log-day")?.value; if (df) { qs.set("day_from", df); qs.set("day_to", df); }
-    const r = await fetch("/api/events?" + qs.toString(), { credentials: "same-origin" });
+    const r = await withBusy(() => fetch("/api/events?" + qs.toString(), { credentials: "same-origin" }));
     if (!r.ok) return;
     const data = await r.json();
     logbox.innerHTML = "";

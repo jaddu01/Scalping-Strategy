@@ -5,24 +5,31 @@
   <div class="page-head">
     <h1>Dashboard</h1>
     <div class="actions">
+      <div class="day-filter" role="group" aria-label="Day">
+        <button class="small" type="button" id="day-prev" title="Previous day" aria-label="Previous day">‹</button>
+        <input type="date" id="dash-day" value="{{ today }}" max="{{ today }}" data-today="{{ today }}" aria-label="Day to show">
+        <button class="small" type="button" id="day-next" title="Next day" aria-label="Next day">›</button>
+        <button class="small" type="button" id="day-today">Today</button>
+      </div>
       <span class="muted">Global kill switch: <span id="gk-state">–</span></span>
       {% if is_admin %}<button class="danger solid kill" data-kill="global">■ GLOBAL KILL SWITCH</button>{% endif %}
     </div>
   </div>
   {% if snap is none %}<div class="flash err">The trading engine is not running (ALGO_DISABLE_ENGINE is set).</div>{% endif %}
-  <div class="cards">
-    <div class="card"><div class="k">Today's gross P&amp;L (all accounts)</div><div class="v" id="tot-gross">–</div></div>
-    <div class="card"><div class="k">Estimated net after charges</div><div class="v" id="tot-net">–</div></div>
-    <div class="card"><div class="k">Trades today</div><div class="v" id="tot-trades">–</div></div>
-    <div class="card"><div class="k">Open positions</div><div class="v" id="tot-open">–</div></div>
+  <div id="day-note" class="flash ok small" hidden></div>
+  <div class="cards day-data">
+    <div class="card"><div class="k"><span class="day-label">Today's</span> gross P&amp;L (all accounts)</div><div class="v" id="tot-gross"><span class="spinner"></span></div></div>
+    <div class="card"><div class="k">Estimated net after charges</div><div class="v" id="tot-net"><span class="spinner"></span></div></div>
+    <div class="card"><div class="k">Trades <span class="day-label-lc">today</span></div><div class="v" id="tot-trades"><span class="spinner"></span></div></div>
+    <div class="card"><div class="k">Open positions (now)</div><div class="v" id="tot-open"><span class="spinner"></span></div></div>
   </div>
 
-  <div class="panel">
-    <h2 style="margin-top:0">Strategy instances</h2>
+  <div class="panel day-data">
+    <div class="panel-head"><h2>Strategy instances</h2><a class="small" id="day-trades-link" href="/trades">Trades of <span class="day-label-lc">today</span> →</a></div>
     <table class="cards-sm">
       <thead><tr><th>On</th><th class="c-title">Instance</th><th>Status</th><th>Mode</th><th>Owner</th><th>Broker</th><th class="num">Trades</th>
         <th class="num">Gross P&amp;L</th><th class="num">Net (est.)</th><th class="c-actions"></th></tr></thead>
-      <tbody id="inst-body"></tbody>
+      <tbody id="inst-body"><tr><td colspan="10" class="muted"><span class="spinner"></span> loading…</td></tr></tbody>
     </table>
   </div>
 
@@ -32,7 +39,7 @@
       <thead><tr><th class="c-title">Trade</th><th>Symbol</th><th class="num">Qty</th><th class="num">Avg</th><th class="num">LTP</th>
         <th class="num">MTM</th><th class="num">Broker P&amp;L</th><th class="num">Spot / spot SL</th><th class="num">SL dist</th>
         <th>Protective SL (broker)</th><th class="num">Take-profit</th><th class="num">Exit in</th><th>State</th></tr></thead>
-      <tbody id="pos-body"></tbody>
+      <tbody id="pos-body"><tr><td colspan="13" class="muted"><span class="spinner"></span> loading…</td></tr></tbody>
     </table>
     <div id="ext-wrap" hidden>
       <h3>Positions not opened by the platform</h3>
@@ -41,11 +48,11 @@
     </div>
   </div>
 
-  <div class="panel">
+  <div class="panel day-data">
     <h2 style="margin-top:0">Broker accounts</h2>
     <table class="cards-sm">
       <thead><tr><th></th><th class="c-title">Account</th><th>Owner</th><th>Status</th><th class="num">Funds</th><th class="num">Gross P&amp;L</th><th class="num">Net (est.)</th><th>Feeds</th></tr></thead>
-      <tbody id="acc-body"></tbody>
+      <tbody id="acc-body"><tr><td colspan="8" class="muted"><span class="spinner"></span> loading…</td></tr></tbody>
     </table>
   </div>
 </div>

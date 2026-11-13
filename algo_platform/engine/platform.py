@@ -446,7 +446,9 @@ class Platform:
         return out
 
     def day_summary(self, day: date | None = None) -> dict[str, Any]:
-        day = day or self.clock.now().date()
+        """P&L per instance / account for one trading day; open positions count only for today."""
+        today = self.clock.now().date()
+        day = day or today
         with self.db.session() as s:
             rows = list(s.scalars(select(Trade).where(Trade.trade_date == day, Trade.status != "FAILED")))
         per_inst: dict[int, dict[str, float]] = {}
@@ -457,7 +459,7 @@ class Platform:
                 b["trades"] += 1
                 b["realized"] += r.gross_pnl or 0.0
                 b["net"] += r.net_pnl or 0.0
-        for lt in self.trades.live.values():
+        for lt in (self.trades.live.values() if day == today else ()):
             u = self.trades.unrealized(lt)
             ch = option_charges(self.settings.charges, lt.entry_price * lt.open_qty,
                                 (self.market.ltp(lt.option_series) or lt.entry_price) * lt.open_qty).total

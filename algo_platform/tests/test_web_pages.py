@@ -175,3 +175,32 @@ def test_full_ui_flow(client):
     for action in ("account_created", "instance_created", "instance_enabled", "instance_disabled", "settings_imported",
                    "holidays_changed", "backtest_run"):
         assert action in audit, action
+
+
+def test_dashboard_day_filter(client):
+    from storage.models import Trade
+
+    p = client.app.state.platform
+    today = p.clock.now().date()
+    past = today - timedelta(days=3)
+    with client.app.state.db.session() as s:
+        s.add_all([
+            Trade(trade_ref="TD1", account_id=None, instance_id=None, trade_date=past, direction="CE_BUY", status="CLOSED",
+                  gross_pnl=1200.0, net_pnl=1100.0),
+            Trade(trade_ref="TD2", account_id=None, instance_id=None, trade_date=past, direction="PE_BUY", status="CLOSED",
+                  gross_pnl=-300.0, net_pnl=-350.0),
+            Trade(trade_ref="TD3", account_id=None, instance_id=None, trade_date=past, direction="PE_BUY", status="FAILED",
+                  gross_pnl=-999.0, net_pnl=-999.0),  # failed entries are not counted
+            Trade(trade_ref="TD4", account_id=None, instance_id=None, trade_date=today, direction="CE_BUY", status="CLOSED",
+                  gross_pnl=50.0, net_pnl=40.0),
+        ])
+        s.commit()
+    j = client.get(f"/api/day?date={past.isoformat()}").json()
+    assert j["date"] == past.isoformat() and j["today"] is False
+    assert j["summary"]["total"] == {"gross": 900.0, "net": 750.0, "trades": 2}
+    assert j["summary"]["instances"]["0"]["trades"] == 2 and j["summary"]["accounts"]["0"]["net"] == 750.0
+    assert client.get(f"/api/day?date={today.isoformat()}").json()["summary"]["total"]["trades"] == 1
+    assert client.get(f"/api/day?date={(today + timedelta(days=1)).isoformat()}").status_code == 400
+    assert client.get("/api/day?date=nonsense").status_code == 422
+    html = client.get("/").text
+    assert 'id="dash-day"' in html and f'max="{today.isoformat()}"' in html and 'id="loadbar"' in html

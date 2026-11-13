@@ -31,6 +31,17 @@ async def state(request: Request, user: SessionInfo = Depends(current_user)) -> 
     return _platform(request).snapshot()
 
 
+@router.get("/day")
+async def day_pnl(request: Request, day: date = Query(..., alias="date"),
+                  user: SessionInfo = Depends(current_user)) -> dict[str, Any]:
+    """The dashboard's P&L figures for one day (per instance, per account, totals)."""
+    p = _platform(request)
+    today = p.clock.now().date()
+    if day > today:
+        raise HTTPException(400, "pick today or an earlier day")
+    return {"date": day.isoformat(), "today": day == today, "summary": p.day_summary(day)}
+
+
 @router.get("/instances/{instance_id}/detail")
 async def instance_detail(instance_id: int, request: Request, user: SessionInfo = Depends(current_user)) -> dict[str, Any]:
     p = _platform(request)
