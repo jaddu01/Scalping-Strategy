@@ -14,7 +14,7 @@ from app.auth.deps import SessionInfo, audit, current_user
 from app.web.forms import errors_by_field, parse_form
 from app.web.render import redirect, render
 from app.web.routes_strategies import _form_ctx, _parse_instance_form
-from app.web.shared import PERSONAL_PARAMS, check_runs, merged
+from app.web.shared import PERSONAL_PARAMS, check_runs, lots_of, merged
 from core.settings_schema import InstanceRiskLimits
 from storage.models import BrokerAccount, SharedStrategy, StrategyInstance
 from storage.repo import diff_dicts
@@ -76,7 +76,7 @@ async def shared_detail(sid: int, request: Request, user: SessionInfo = Depends(
         rt = p.strategies.runtimes.get(r.id) if p else None
         b = today.get(r.id, {})
         runs.append({"row": r, "owner": names.get(r.owner_user_id or 0, "–"),
-                     "account": accounts.get(r.broker_account_id or 0, "–"), "lots": (r.params or {}).get("lots", "–"),
+                     "account": accounts.get(r.broker_account_id or 0, "–"), "lots": lots_of(r.params),
                      "status": rt.status if rt else r.status, "can_edit": can_control(user, r.owner_user_id),
                      "open": bool(p and p.trades.open_trade_count(instance_id=r.id)),
                      "trades": b.get("trades", 0), "net": b.get("net", 0.0)})
@@ -180,7 +180,7 @@ async def create_run(sid: int, request: Request, user: SessionInfo = Depends(req
         iid = row.id
     audit(request, user, "run_created", values["name"], {"strategy": sh.name, "mode": values["mode"],
                                                          "owner_user_id": values["owner_user_id"],
-                                                         "lots": params.model_dump(mode="json").get("lots")})
+                                                         "lots": lots_of(params.model_dump(mode="json"))})
     return redirect(f"/strategies/{iid}", ok="Your run is created (disabled). Switch it on when you are ready.")
 
 

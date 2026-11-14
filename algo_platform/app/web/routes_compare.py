@@ -12,6 +12,7 @@ from sqlalchemy import select
 from app.auth.access import owner_choices, owner_filter, usernames
 from app.auth.deps import SessionInfo, current_user
 from app.web.render import render
+from app.web.shared import lots_of
 from storage.models import BrokerAccount, StrategyInstance, Trade
 
 router = APIRouter()
@@ -20,7 +21,7 @@ SL_REASONS = {"spot_stop_loss", "protective_sl", "trailing_stop"}
 TP_REASONS = {"take_profit", "tp1", "tp2"}
 TIME_REASONS = {"timed_exit", "square_off"}
 PERIODS = {"today": 0, "7d": 6, "30d": 29, "90d": 89}
-TEMPLATE_SHORT = {"smc_playbook": "SMC", "nifty_ref_breakout": "Original", "nifty_early_breakout": "Early-Slot",
+TEMPLATE_SHORT = {"chandelier_exit": "Chandelier", "smc_playbook": "SMC", "nifty_ref_breakout": "Original", "nifty_early_breakout": "Early-Slot",
                   "nifty_ref_breakout_tp": "Original + TP", "nifty_early_breakout_tp": "Early-Slot + TP",
                   "nifty_two_entry": "2-Entry", "nifty_two_entry_tp": "2-Entry + TP", "ema_rsi_breakout": "EMA + RSI"}
 
@@ -93,7 +94,7 @@ def compare_rows(instances: list[StrategyInstance], trades: list[Trade], account
     for i in instances:
         rows[i.id] = Row(id=i.id, name=i.name, template=template_label(i.template_id, i.params), mode=i.mode,
                          broker=accounts.get(i.broker_account_id or 0, "–"), enabled=i.enabled,
-                         status=runtime_status.get(i.id, i.status or "STOPPED"), lots=(i.params or {}).get("lots", "–"))
+                         status=runtime_status.get(i.id, i.status or "STOPPED"), lots=lots_of(i.params))
     closed = sorted((t for t in trades if t.status == "CLOSED" and t.instance_id in rows),
                     key=lambda t: (t.exit_time or t.entry_time or t.signal_time, t.id))
     for t in closed:

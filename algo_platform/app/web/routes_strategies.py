@@ -14,7 +14,7 @@ from app.auth.deps import SessionInfo, audit, current_user
 from app.web.forms import build_fields, errors_by_field, parse_form
 from app.web.render import redirect, render
 from core.settings_schema import InstanceRiskLimits
-from app.web.shared import merged, personal_keys, split_fields
+from app.web.shared import lots_of, merged, personal_keys, split_fields
 from storage.models import BrokerAccount, OrderRecord, SharedStrategy, StrategyInstance, Trade
 from storage.repo import diff_dicts
 from strategies.registry import all_templates, get_template
@@ -107,7 +107,7 @@ async def list_instances(request: Request, user: SessionInfo = Depends(current_u
         items.append({"row": r, "account": accounts.get(r.broker_account_id or 0, "–"),
                       "status": rt.status if rt else r.status,
                       "open": bool(p and p.trades.open_trade_count(instance_id=r.id)),
-                      "lots": (r.params or {}).get("lots", "–"),
+                      "lots": lots_of(r.params),
                       "owner": names.get(r.owner_user_id or 0, "–"), "can_edit": can_control(user, r.owner_user_id)})
     by_strategy: dict[int, list[dict[str, Any]]] = {}
     for it in items:
@@ -377,7 +377,7 @@ async def instance_slots(iid: int, request: Request, user: SessionInfo = Depends
     views: dict[str, dict[str, Any]] = {}
     totals = {"points": 0.0, "pnl": 0.0, "trades": 0}
     st = (snap or {}).get("strategy") or {}
-    refs = [s["trade_id"] for s in (st.get("slots") or []) + (st.get("signals") or []) + (st.get("setups") or [])
+    refs = [s["trade_id"] for s in (st.get("slots") or []) + (st.get("signals") or []) + (st.get("setups") or []) + (st.get("ce_signals") or [])
             if s.get("trade_id")]
     if refs:
         from app.web.slot_view import slot_trade_view

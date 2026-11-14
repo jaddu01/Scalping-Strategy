@@ -11,7 +11,18 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 # what each partner sets for themselves; everything else is the shared rules
-PERSONAL_PARAMS = ("lots", "tp1_lots", "tp2_lots")
+PERSONAL_PARAMS = ("lots", "tp1_lots", "tp2_lots", "tp3_lots")
+
+
+def lots_of(params: dict[str, Any] | None) -> Any:
+    """Lots per trade for tables: the `lots` setting, or TP1 + TP2 + TP3 lots where the split is the size
+    (Chandelier Exit)."""
+    p = params or {}
+    if p.get("lots") is not None:
+        return p["lots"]
+    if p.get("tp3_lots") is not None:
+        return sum(int(p.get(k) or 0) for k in ("tp1_lots", "tp2_lots", "tp3_lots"))
+    return "–"
 
 
 def personal_keys(model: type[BaseModel]) -> list[str]:

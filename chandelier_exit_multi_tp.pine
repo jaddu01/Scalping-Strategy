@@ -1,0 +1,234 @@
+//@version=6
+// Chandelier Exit script may be freely distributed under the terms of the GPL-3.0 license.
+// Extended with: SL at previous candle low/high + 3 partial targets (TP1/TP2/TP3) with lot split.
+indicator('Chandelier Exit + Multi-TP', shorttitle = 'CE Multi-TP', overlay = true, max_labels_count = 500)
+
+const string calcGroup = 'Calculation'
+length   = input.int(7, title = 'ATR Period', group = calcGroup)
+mult     = input.float(2.0, step = 0.1, title = 'ATR Multiplier', group = calcGroup)
+useClose = input.bool(true, title = 'Use Close Price for Extremums', group = calcGroup)
+
+const string visualGroup = 'Visuals'
+showLabels     = input.bool(true, title = 'Show Buy/Sell Labels', group = visualGroup)
+highlightState = input.bool(true, title = 'Highlight State', group = visualGroup)
+showLevels     = input.bool(true, title = 'Show Entry / SL / Target Levels', group = visualGroup)
+showPnl        = input.bool(true, title = 'Show Trade Result Label', group = visualGroup)
+
+const string riskGroup = 'Targets & Lots'
+tp1RR  = input.float(2.0, title = 'TP1   1 :', minval = 0.5, step = 0.5, group = riskGroup, inline = 'tp1')
+tp1Qty = input.int(4, title = 'Lots', minval = 0, group = riskGroup, inline = 'tp1')
+tp2RR  = input.float(3.0, title = 'TP2   1 :', minval = 0.5, step = 0.5, group = riskGroup, inline = 'tp2')
+tp2Qty = input.int(4, title = 'Lots', minval = 0, group = riskGroup, inline = 'tp2')
+tp3RR  = input.float(4.0, title = 'TP3   1 :', minval = 0.5, step = 0.5, group = riskGroup, inline = 'tp3')
+tp3Qty = input.int(2, title = 'Lots', minval = 0, group = riskGroup, inline = 'tp3')
+
+const string slGroup = 'Stop Loss'
+slBufferTicks  = input.int(0, title = 'SL Buffer (ticks)', minval = 0, group = slGroup, tooltip = 'Extra ticks placed beyond the previous candle low/high.')
+moveSLtoBE     = input.bool(false, title = 'Move SL to Entry after TP1 Hit', group = slGroup, tooltip = 'After TP1 books profit, the remaining lots can no longer turn into a loss.')
+exitOnOpposite = input.bool(true, title = 'Close Remaining Lots on Opposite CE Signal', group = slGroup)
+
+const string alertGroup = 'Alerts'
+awaitBarConfirmation = input.bool(true, title = 'Await Bar Confirmation', group = alertGroup)
+
+int totalLots = tp1Qty + tp2Qty + tp3Qty
+
+if not (tp1RR < tp2RR and tp2RR < tp3RR)
+    runtime.error('Targets must increase: TP1 < TP2 < TP3.')
+if totalLots <= 0
+    runtime.error('Total lots (TP1 + TP2 + TP3) must be more than 0.')
+
+//--- Chandelier Exit (original logic) ---
+
+atr = mult * ta.atr(length)
+
+longStop = (useClose ? ta.highest(close, length) : ta.highest(length)) - atr
+longStopPrev = nz(longStop[1], longStop)
+longStop := close[1] > longStopPrev ? math.max(longStop, longStopPrev) : longStop
+
+shortStop = (useClose ? ta.lowest(close, length) : ta.lowest(length)) + atr
+shortStopPrev = nz(shortStop[1], shortStop)
+shortStop := close[1] < shortStopPrev ? math.min(shortStop, shortStopPrev) : shortStop
+
+var int dir = 1
+dir := close > shortStopPrev ? 1 : close < longStopPrev ? -1 : dir
+
+buySignal  = dir == 1 and dir[1] == -1
+sellSignal = dir == -1 and dir[1] == 1
+
+//--- Trade state ---
+
+var int   tradeDir   = 0       // 1 = long, -1 = short, 0 = flat
+var float entryPrice = na
+var float slPrice    = na
+var float tp1Price   = na
+var float tp2Price   = na
+var float tp3Price   = na
+var bool  tp1Done    = false
+var bool  tp2Done    = false
+var bool  tp3Done    = false
+var int   lotsOpen   = 0
+var float realized   = 0.0     // booked points × lots for the current trade
+
+alertFreq = awaitBarConfirmation ? alert.freq_once_per_bar_close : alert.freq_once_per_bar
+
+f_json(string action, float price, int qty) =>
+    '{"action":"' + action + '","symbol":"' + syminfo.ticker + '","exchange":"' + syminfo.prefix + '","price":' + str.tostring(price, format.mintick) + ',"qty":' + str.tostring(qty) + ',"lots_open":' + str.tostring(lotsOpen) + ',"entry":' + str.tostring(entryPrice, format.mintick) + ',"sl":' + str.tostring(slPrice, format.mintick) + ',"tp1":' + str.tostring(tp1Price, format.mintick) + ',"tp2":' + str.tostring(tp2Price, format.mintick) + ',"tp3":' + str.tostring(tp3Price, format.mintick) + '}'
+
+f_side(int d) =>
+    d == 1 ? 'LONG' : 'SHORT'
+
+//--- 1) Manage the open trade (opened on an earlier bar) ---
+
+int   curDir   = tradeDir
+bool  slHit    = false
+bool  tp1Hit   = false
+bool  tp2Hit   = false
+bool  tp3Hit   = false
+int   slQty    = 0
+float slExitPx = na
+
+if curDir != 0
+    bool slTouched = curDir == 1 ? low <= slPrice : high >= slPrice
+    if slTouched    // if SL and a target are both touched in one candle, assume SL first (conservative)
+        slHit    := true
+        slQty    := lotsOpen
+        slExitPx := slPrice
+        realized += (slPrice - entryPrice) * curDir * lotsOpen
+        lotsOpen := 0
+    else
+        if not tp1Done and (curDir == 1 ? high >= tp1Price : low <= tp1Price)
+            tp1Done  := true
+            tp1Hit   := true
+            lotsOpen -= tp1Qty
+            realized += (tp1Price - entryPrice) * curDir * tp1Qty
+            if moveSLtoBE
+                slPrice := entryPrice
+        if not tp2Done and (curDir == 1 ? high >= tp2Price : low <= tp2Price)
+            tp2Done  := true
+            tp2Hit   := true
+            lotsOpen -= tp2Qty
+            realized += (tp2Price - entryPrice) * curDir * tp2Qty
+        if not tp3Done and (curDir == 1 ? high >= tp3Price : low <= tp3Price)
+            tp3Done  := true
+            tp3Hit   := true
+            lotsOpen -= tp3Qty
+            realized += (tp3Price - entryPrice) * curDir * tp3Qty
+
+bool oppExit = exitOnOpposite and curDir != 0 and lotsOpen > 0 and ((curDir == 1 and sellSignal) or (curDir == -1 and buySignal))
+int  oppQty  = 0
+if oppExit
+    oppQty   := lotsOpen
+    realized += (close - entryPrice) * curDir * lotsOpen
+    lotsOpen := 0
+
+// Exit alerts fire here, before a new trade can overwrite the levels
+if tp1Hit and tp1Qty > 0
+    alert(f_json('EXIT_' + f_side(curDir) + '_TP1', tp1Price, tp1Qty), alertFreq)
+if tp2Hit and tp2Qty > 0
+    alert(f_json('EXIT_' + f_side(curDir) + '_TP2', tp2Price, tp2Qty), alertFreq)
+if tp3Hit and tp3Qty > 0
+    alert(f_json('EXIT_' + f_side(curDir) + '_TP3', tp3Price, tp3Qty), alertFreq)
+if slHit and slQty > 0
+    alert(f_json('EXIT_' + f_side(curDir) + '_SL', slExitPx, slQty), alertFreq)
+if oppExit
+    alert(f_json('EXIT_' + f_side(curDir) + '_REVERSE', close, oppQty), alertFreq)
+
+// Trade fully closed?
+bool tradeClosed = curDir != 0 and lotsOpen <= 0
+if tradeClosed
+    if showPnl
+        string sign = realized >= 0 ? '+' : ''
+        label.new(bar_index, curDir == 1 ? high : low, 'Net ' + sign + str.tostring(realized, '#.##') + ' pts×lots\n(' + sign + str.tostring(realized / totalLots, '#.##') + ' pts/lot avg)', style = curDir == 1 ? label.style_label_down : label.style_label_up, size = size.tiny, color = realized >= 0 ? color.new(color.green, 20) : color.new(color.red, 20), textcolor = color.white)
+    tradeDir := 0
+
+//--- 2) Open a new trade on a CE signal (one trade at a time) ---
+
+float slBuffer = slBufferTicks * syminfo.mintick
+bool  newLong  = false
+bool  newShort = false
+
+if (buySignal or sellSignal) and tradeDir == 0
+    int   d    = buySignal ? 1 : -1
+    float sl   = d == 1 ? low[1] - slBuffer : high[1] + slBuffer
+    float risk = (close - sl) * d
+    if risk > 0
+        tradeDir   := d
+        entryPrice := close
+        slPrice    := sl
+        tp1Price   := close + risk * tp1RR * d
+        tp2Price   := close + risk * tp2RR * d
+        tp3Price   := close + risk * tp3RR * d
+        tp1Done    := false
+        tp2Done    := false
+        tp3Done    := false
+        lotsOpen   := totalLots
+        realized   := 0.0
+        newLong    := d == 1
+        newShort   := d == -1
+
+if newLong
+    alert(f_json('BUY', entryPrice, totalLots), alertFreq)
+if newShort
+    alert(f_json('SELL', entryPrice, totalLots), alertFreq)
+
+//--- Visuals ---
+
+const color textColor      = color.white
+const color longColor      = color.green
+const color shortColor     = color.red
+const color longFillColor  = color.new(color.green, 85)
+const color shortFillColor = color.new(color.red, 85)
+const color slColor        = color.red
+const color tp1Color       = color.lime
+const color tp2Color       = color.aqua
+const color tp3Color       = color.yellow
+const color entryColor     = color.gray
+
+longStopPlot = plot(dir == 1 ? longStop : na, title = 'Long Stop', style = plot.style_linebr, linewidth = 2, color = longColor)
+plotshape(buySignal ? longStop : na, title = 'Long Stop Start', location = location.absolute, style = shape.circle, size = size.tiny, color = longColor)
+plotshape(buySignal and showLabels ? longStop : na, title = 'Buy Label', text = 'Buy', location = location.absolute, style = shape.labelup, size = size.tiny, color = longColor, textcolor = textColor)
+
+shortStopPlot = plot(dir == 1 ? na : shortStop, title = 'Short Stop', style = plot.style_linebr, linewidth = 2, color = shortColor)
+plotshape(sellSignal ? shortStop : na, title = 'Short Stop Start', location = location.absolute, style = shape.circle, size = size.tiny, color = shortColor)
+plotshape(sellSignal and showLabels ? shortStop : na, title = 'Sell Label', text = 'Sell', location = location.absolute, style = shape.labeldown, size = size.tiny, color = shortColor, textcolor = textColor)
+
+midPricePlot = plot(ohlc4, title = '', display = display.none, editable = false)
+
+fill(midPricePlot, longStopPlot, title = 'Long State Filling', color = (highlightState and dir == 1 ? longFillColor : na))
+fill(midPricePlot, shortStopPlot, title = 'Short State Filling', color = (highlightState and dir == -1 ? shortFillColor : na))
+
+// Level lines (hidden on the entry bar so consecutive trades don't join with a vertical stroke;
+// each target line disappears once that target is hit)
+bool inTrade = showLevels and tradeDir != 0 and not (newLong or newShort)
+plot(inTrade ? entryPrice : na, title = 'Entry', style = plot.style_linebr, linewidth = 1, color = entryColor)
+plot(inTrade ? slPrice : na, title = 'Stop Loss', style = plot.style_linebr, linewidth = 2, color = slColor)
+plot(inTrade and not tp1Done ? tp1Price : na, title = 'TP1', style = plot.style_linebr, linewidth = 2, color = tp1Color)
+plot(inTrade and not tp2Done ? tp2Price : na, title = 'TP2', style = plot.style_linebr, linewidth = 2, color = tp2Color)
+plot(inTrade and not tp3Done ? tp3Price : na, title = 'TP3', style = plot.style_linebr, linewidth = 2, color = tp3Color)
+
+// Level labels on the entry bar
+f_lvl(float price, string txt, color bg, color fg) =>
+    label.new(bar_index, price, txt + '  ' + str.tostring(price, format.mintick), style = label.style_label_left, size = size.tiny, color = bg, textcolor = fg)
+
+if showLevels and (newLong or newShort)
+    f_lvl(slPrice, 'SL (' + str.tostring(totalLots) + ' lots)', slColor, color.white)
+    f_lvl(tp1Price, 'TP1 1:' + str.tostring(tp1RR) + ' (' + str.tostring(tp1Qty) + ')', tp1Color, color.black)
+    f_lvl(tp2Price, 'TP2 1:' + str.tostring(tp2RR) + ' (' + str.tostring(tp2Qty) + ')', tp2Color, color.black)
+    f_lvl(tp3Price, 'TP3 1:' + str.tostring(tp3RR) + ' (' + str.tostring(tp3Qty) + ')', tp3Color, color.black)
+
+// Hit markers
+plotshape(showLevels and tp1Hit ? tp1Price : na, title = 'TP1 Hit', text = 'TP1', location = location.absolute, style = shape.diamond, size = size.tiny, color = tp1Color, textcolor = tp1Color)
+plotshape(showLevels and tp2Hit ? tp2Price : na, title = 'TP2 Hit', text = 'TP2', location = location.absolute, style = shape.diamond, size = size.tiny, color = tp2Color, textcolor = tp2Color)
+plotshape(showLevels and tp3Hit ? tp3Price : na, title = 'TP3 Hit', text = 'TP3', location = location.absolute, style = shape.diamond, size = size.tiny, color = tp3Color, textcolor = tp3Color)
+plotshape(showLevels and slHit ? slExitPx : na, title = 'Stop Hit', text = 'SL', location = location.absolute, style = shape.xcross, size = size.tiny, color = slColor, textcolor = slColor)
+
+//--- Simple alerts (fixed text) ---
+
+await = awaitBarConfirmation ? barstate.isconfirmed : true
+alertcondition(dir != dir[1] and await, title = 'CE Direction Change', message = 'Chandelier Exit has changed direction, {{exchange}}:{{ticker}}')
+alertcondition(buySignal and await, title = 'CE Buy', message = 'Chandelier Exit Buy, {{exchange}}:{{ticker}}')
+alertcondition(sellSignal and await, title = 'CE Sell', message = 'Chandelier Exit Sell, {{exchange}}:{{ticker}}')
+alertcondition(tp1Hit and await, title = 'CE TP1 Hit', message = 'Chandelier Exit TP1 hit, {{exchange}}:{{ticker}}')
+alertcondition(tp2Hit and await, title = 'CE TP2 Hit', message = 'Chandelier Exit TP2 hit, {{exchange}}:{{ticker}}')
+alertcondition(tp3Hit and await, title = 'CE TP3 Hit', message = 'Chandelier Exit TP3 hit, {{exchange}}:{{ticker}}')
+alertcondition(slHit and await, title = 'CE Stop Hit', message = 'Chandelier Exit stop-loss hit, {{exchange}}:{{ticker}}')
