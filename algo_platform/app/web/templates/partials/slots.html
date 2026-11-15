@@ -15,8 +15,12 @@
       {% set v = views.get(s.trade_id, {}) if s.trade_id else {} %}
       {% set hit = (s.tp_hit or '').split('+') %}
       <tr><td>{{ s.no }}</td><td>{{ s.time }}</td><td>{{ s.direction }}</td><td class="num">{{ s.entry|money }}</td>
+        {% if rt.strategy.use_stop_loss is not defined or rt.strategy.use_stop_loss %}
         <td class="num nowrap">{{ s.stop|money }}{% if s.be %} <span class="small muted">→ entry</span>{% endif %}<div class="small muted">risk {{ s.risk }}</div></td>
+        {% else %}<td class="num muted" title="stop-loss switched off: the opposite signal or 15:15 closes the trade">–</td>{% endif %}
+        {% if rt.strategy.use_targets is not defined or rt.strategy.use_targets %}
         {% for k in ('tp1', 'tp2', 'tp3') %}<td class="num {{ 'pos' if k in hit else '' }}">{{ s[k]|money }}{% if k in hit %} ✓{% endif %}</td>{% endfor %}
+        {% else %}<td class="num muted" colspan="3" title="targets switched off: all lots held to the opposite signal">held to opposite signal</td>{% endif %}
         <td><span class="badge {{ 'IN_TRADE' if s.state == 'IN_TRADE' else 'grey' }}">{{ s.state }}</span></td>
         <td class="num {{ v.points|pnlc if v else '' }}">{% if v and v.points is not none %}<b>{{ '%+.2f'|format(v.points) }}</b>{% elif v %}–{% endif %}</td>
         <td class="num nowrap">{% if v %}{{ v.entry_premium|money }} → {{ v.exit_premium|money }}{% endif %}</td>

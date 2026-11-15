@@ -206,7 +206,7 @@ class BacktestContext:
         self.open = trade
         self.trades.append(trade)
         self.emit("ENTRY", f"ENTRY {trade.direction} symbol={symbol} strike={trade.strike:g} qty={qty} "
-                           f"spot={signal.spot:.2f} spot_SL={plan.spot_sl:.2f} exit={hm_or_hms(st.exit_at)}", trade_id=tid)
+                           f"spot={signal.spot:.2f} spot_SL={plan.spot_sl if plan.spot_sl is None else round(plan.spot_sl, 2)} exit={hm_or_hms(st.exit_at)}", trade_id=tid)
         return TradeInfo(trade_id=tid, slot_id=signal.slot_id, direction=signal.direction.value, status="OPEN",
                          entry_price=prem)
 

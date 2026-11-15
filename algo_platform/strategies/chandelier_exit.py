@@ -14,6 +14,10 @@ Exits (spot levels, watched on every tick by the engine):
   optional   stop to the entry price once TP1 is reached (`move_sl_to_entry_after_tp1`)
   opposite   an opposite signal closes what is left and opens the new direction once flat (`exit_on_opposite`)
   hard exit  the 15:15 square-off
+Switches (both on = the Multi-TP script; both off = the original Chandelier_Exit.pine, stop-and-reverse):
+  `use_stop_loss`  off: no previous-candle stop; the trade ends on the opposite signal or 15:15
+  `use_targets`    off: no TP1-TP3; every lot is held to the opposite signal / stop / 15:15
+  (45-day NIFTY study, ATR 7 x 2: both on +1.08 lakh, both off +2.91 lakh, estimated)
 Platform additions: new entries `entry_start`-`entry_end`; `skip_first_candle` ignores signals of the day's first
 candle (its "previous candle" is yesterday's last one, so the stop can be 100+ points away: in a 45-day NIFTY study
 those 25 trades averaged a 117-point stop and lost); one position at a time; sideways filter (log-only by default).
@@ -56,6 +60,13 @@ class ChandelierSettings(RegimeSettings):
     atr_multiplier: float = Field(2.0, gt=0, le=20, title="ATR multiplier")
     use_close: bool = Field(True, title="Use close price for extremums",
                             description="Off: highest high / lowest low instead of highest / lowest close")
+    use_stop_loss: bool = Field(True, title="Stop-loss at the previous candle",
+                                description="Off: no stop (stop-and-reverse, as Chandelier_Exit.pine); the trade ends "
+                                            "on the opposite signal or the 15:15 exit. 'Protective SL-M' can still "
+                                            "add a broker-side disaster stop")
+    use_targets: bool = Field(True, title="Targets TP1 / TP2 / TP3",
+                              description="Off: all lots (TP1 + TP2 + TP3 lots) are held to the opposite signal, "
+                                          "the stop or 15:15")
     # --- Pine "Targets & Lots"
     tp1_rr: float = Field(2.0, ge=0.5, le=20, title="TP1 (× risk)")
     tp1_lots: int = Field(4, ge=0, le=200, title="TP1 lots")
@@ -63,7 +74,8 @@ class ChandelierSettings(RegimeSettings):
     tp2_lots: int = Field(4, ge=0, le=200, title="TP2 lots")
     tp3_rr: float = Field(4.0, ge=0.5, le=20, title="TP3 (× risk)")
     tp3_lots: int = Field(2, ge=0, le=200, title="TP3 lots",
-                          description="Lots per trade = TP1 + TP2 + TP3 lots (4 + 4 + 2 = 10)")
+                          description="Lots per trade = TP1 + TP2 + TP3 lots (4 + 4 + 2 = 10), also when targets "
+                                      "are off")
     # --- Pine "Stop Loss"
     sl_buffer_points: float = Field(0.0, ge=0, le=500, title="SL buffer beyond the previous candle (points)")
     move_sl_to_entry_after_tp1: bool = Field(False, title="Move SL to entry after TP1 is hit")
@@ -400,7 +412,7 @@ class ChandelierExit(Strategy):
             reason = "first_candle"
         elif not (combine(close_time.date(), s.entry_start) <= close_time <= combine(close_time.date(), s.entry_end)):
             reason = "outside_entry_window"
-        elif risk <= 0:
+        elif risk <= 0 and (s.use_stop_loss or s.use_targets):
             reason = "no_risk"  # the close is beyond the previous candle's extreme (as the script skips)
         if reason:
             x.state, x.result = "SKIPPED", reason
@@ -430,7 +442,7 @@ class ChandelierExit(Strategy):
         self._persist()
         now = self.ctx.now()
         spot = self.ctx.ltp(self.spot) or x.entry
-        if (spot <= x.stop) if x.long else (spot >= x.stop):
+        if s.use_stop_loss and ((spot <= x.stop) if x.long else (spot >= x.stop)):
             x.state, x.result = "SKIPPED", "price_beyond_stop"
             return
         opt_exch = DERIVATIVE_EXCHANGE[s.exchange]
@@ -439,8 +451,8 @@ class ChandelierExit(Strategy):
             x.state, x.result = "REJECTED", "no_expiry_available"
             return
         side = "above" if x.long else "below"
-        partials = [PartialTarget(lbl, lvl, side, n) for lbl, lvl, n in
-                    (("tp1", x.tp1, s.tp1_lots), ("tp2", x.tp2, s.tp2_lots)) if n > 0]
+        partials = ([PartialTarget(lbl, lvl, side, n) for lbl, lvl, n in
+                     (("tp1", x.tp1, s.tp1_lots), ("tp2", x.tp2, s.tp2_lots)) if n > 0] if s.use_targets else [])
         signal = EntrySignal(
             slot_id=x.slot_id, direction=Direction(x.side),
             option=InstrumentKey(underlying=s.underlying, exchange=opt_exch,
@@ -449,14 +461,17 @@ class ChandelierExit(Strategy):
             lots=s.lots, spot=spot, trigger=x.entry, order_type=OrderType(s.entry_order_type),
             limit_slippage_pct=s.limit_slippage_pct, signal_time=now,
             exit_plan=ExitPlan(exit_at=combine(now.date(), self.ctx.square_off_time()), underlying=self.spot,
-                               spot_sl=x.stop, spot_sl_side="below" if x.long else "above",
-                               tp_spot_level=x.tp3, tp_spot_side=side,
+                               spot_sl=x.stop if s.use_stop_loss else None,
+                               spot_sl_side="below" if x.long else "above",
+                               tp_spot_level=x.tp3 if s.use_targets else None, tp_spot_side=side,
                                protective_sl_pct=s.protective_sl_pct or None, partial_targets=partials),
             meta={"setup_no": x.no, "underlying": s.underlying, "candle": fmt_hm(x.candle_start), "risk_pts": x.risk,
                   "tp1": x.tp1, "tp2": x.tp2, "tp3": x.tp3, "regime_entry": x.regime},
         )
-        self._emit("SETUP", f"ENTRY #{x.no} {x.side} close={x.entry:.2f} SL={x.stop:.2f} (risk {x.risk:.2f}) "
-                            f"TP1={x.tp1:.2f} TP2={x.tp2:.2f} TP3={x.tp3:.2f}"
+        levels = (f"SL={x.stop:.2f} (risk {x.risk:.2f}) " if s.use_stop_loss else "no SL ") + (
+            f"TP1={x.tp1:.2f} TP2={x.tp2:.2f} TP3={x.tp3:.2f}" if s.use_targets else "no targets (held to the opposite "
+                                                                                      "signal / 15:15)")
+        self._emit("SETUP", f"ENTRY #{x.no} {x.side} close={x.entry:.2f} {levels}"
                             + (f" regime={x.regime['note']}" if x.regime else ""), setup=x.no)
         info = await self.ctx.submit_entry(signal)
         if info is None:
@@ -473,7 +488,7 @@ class ChandelierExit(Strategy):
         if self.spot is None or tick.token != self.spot.token:
             return
         a = self.active
-        if a is None or a.state != "IN_TRADE" or not a.trade_id:
+        if a is None or a.state != "IN_TRADE" or not a.trade_id or not self.settings.use_targets:
             return
         p = tick.ltp
         hit = [lbl for lbl, lvl in (("tp1", a.tp1), ("tp2", a.tp2), ("tp3", a.tp3))
@@ -481,7 +496,7 @@ class ChandelierExit(Strategy):
         if hit and "+".join(hit) != a.tp_hit and len(hit) > len(a.tp_hit.split("+") if a.tp_hit else []):
             a.tp_hit = "+".join(hit)
             self._persist()
-        if self.settings.move_sl_to_entry_after_tp1 and not a.be_moved and "tp1" in hit:
+        if self.settings.move_sl_to_entry_after_tp1 and self.settings.use_stop_loss and not a.be_moved and "tp1" in hit:
             a.be_moved = True
             self.ctx.tighten_stop(a.trade_id, a.entry)
             self._emit("BREAKEVEN", f"#{a.no} TP1 reached: stop moved to entry {a.entry:.2f}", setup=a.no)
@@ -535,4 +550,5 @@ class ChandelierExit(Strategy):
                        "candle": fmt_hm(ln.last.start) if ln.last else None,
                        "close": ln.last.close if ln.last else None, "tf": tf},
                 "ce_signals": [x.to_dict(tf) for x in self.signals],
+                "use_stop_loss": self.settings.use_stop_loss, "use_targets": self.settings.use_targets,
                 "cold": self.cold, "pending_settings": self.has_pending_settings}

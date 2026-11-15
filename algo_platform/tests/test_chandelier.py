@@ -245,3 +245,62 @@ def test_new_strategy_form_renders(tmp_path):
         for label in ("ATR period", "ATR multiplier", "TP1 lots", "TP3 (× risk)", "Skip signals of the day&#39;s first candle",
                       "Move SL to entry after TP1 is hit", "Close remaining lots on the opposite signal", "Sideways filter"):
             assert label in html, label
+
+
+# ---------------------------------------------------------------- stop-and-reverse (Chandelier_Exit.pine): no SL, no targets
+async def test_no_sl_no_targets_is_stop_and_reverse():
+    ctx, s = await _first_trade(use_stop_loss=False, use_targets=False)
+    sig = ctx.signals[0]
+    assert sig.lots == 10  # TP1 + TP2 + TP3 lots, all held
+    assert sig.exit_plan.spot_sl is None and sig.exit_plan.tp_spot_level is None and sig.exit_plan.partial_targets == []
+    assert sig.exit_plan.exit_at == combine(DAY, at("15:15").time())
+    x = s.active
+    await s.on_tick(tick(x.tp3))  # no targets: nothing is marked, no stop is moved
+    assert x.tp_hit == "" and ctx.stop_updates == []
+    assert s.status()["use_stop_loss"] is False and s.status()["use_targets"] is False
+
+
+async def test_stop_and_reverse_still_reverses_on_the_opposite_signal():
+    hist, today = split(series(3))
+    ctx, s = await started(hist, use_stop_loss=False, use_targets=False)
+    first = await feed(ctx, s, today, stop_at=lambda st: bool(ctx.signals))
+    a = s.active
+    await feed(ctx, s, [c for c in today if c.start > first.start], stop_at=lambda st: bool(ctx.exit_requests))
+    assert ctx.exit_requests[0] == (a.trade_id, "opposite_signal", None)
+    ctx.open_position = False
+    await s.on_trade_update(TradeInfo(trade_id=a.trade_id, slot_id=a.slot_id, direction=a.side, status="CLOSED",
+                                      exit_reason="opposite_signal"))
+    assert len(ctx.signals) == 2 and ctx.signals[1].exit_plan.spot_sl is None
+
+
+def test_switches_default_on_and_table_hides_unused_levels():
+    from app.web.render import templates
+
+    d = default_settings("chandelier_exit")
+    assert d["use_stop_loss"] and d["use_targets"]  # the Multi-TP strategy is unchanged
+    rt = {"strategy": {"ce": {"direction": "short", "long_stop": 1.0, "short_stop": 2.0, "candle": "10:30", "close": 1.5,
+                              "tf": 5},
+                       "ce_signals": [{"no": 1, "time": "10:35", "direction": "PE_BUY", "entry": 24060.0, "stop": 24080.0,
+                                       "risk": 20.0, "tp1": 24020.0, "tp2": 24000.0, "tp3": 23980.0, "tp_hit": "",
+                                       "be": False, "state": "IN_TRADE", "result": None, "trade_id": None,
+                                       "regime": "ok", "regime_block": False}],
+                       "use_stop_loss": False, "use_targets": False, "cold": False, "pending_settings": False}}
+    html = templates.get_template("partials/slots.html").render(rt=rt, views={}, totals={})
+    assert "held to opposite signal" in html and "24,080.00" not in html and "23,980.00" not in html
+
+
+async def test_backtest_runs_without_a_stop():
+    from datetime import date
+
+    from backtest.engine import BacktestConfig, run_backtest
+
+    minutes = []
+    for c in series(4):
+        for k in range(5):  # 5-min candles as 1-min bars with the same path
+            p = c.open + (c.close - c.open) * (k + 1) / 5
+            minutes.append(Candle(start=c.start + timedelta(minutes=k), timeframe_min=1, open=c.open if k == 0 else p,
+                                  high=max(c.open, p) + 1, low=min(c.open, p) - 1, close=p))
+    res = await run_backtest(BacktestConfig(template_id="chandelier_exit", day_from=DAY, day_to=DAY,
+                                            params={"use_stop_loss": False, "use_targets": False}), minutes)
+    assert res["trades"] and all(t["spot_sl"] is None for t in res["trades"])
+    assert {t["exit_reason"] for t in res["trades"]} <= {"opposite_signal", "timed_exit"}
