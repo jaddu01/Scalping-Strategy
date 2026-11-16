@@ -389,3 +389,72 @@ async def test_live_exit_never_sells_another_runs_share_of_a_strike(tmp_path):
             assert s.get(Trade, a.id).exit_reason == "manual_exit_at_broker"
     finally:
         await env.platform.stop()
+
+
+async def test_pnl_check_ignores_broker_average_price_rounding(tmp_path):
+    """Real case (16-Nov, NIFTY 25300 PE, 3 trades x 325): exact fills give -1498.25; the broker rounds its buy /
+    sell averages to 2 decimals and shows -1491.75. That is not a mismatch. A real gap is logged once."""
+    from brokers.base import Exchange, Position, ProductType
+
+    env = await build_env(tmp_path)
+    try:
+        p = env.platform
+        today = p.clock.now().date()
+        with env.db.session() as s:
+            for ref, g in (("R1", -2483.0), ("R2", -2486.25), ("R3", 3471.0)):
+                s.add(Trade(trade_ref=ref, account_id=env.account_id, mode="paper", trade_date=today, token="T1",
+                            direction="PE_BUY", status="CLOSED", gross_pnl=g))
+            s.commit()
+        _, sync = p.accounts[env.account_id].shadow()
+
+        def pos(pnl):
+            return Position(exchange=Exchange.NFO, tradingsymbol="NIFTY17NOV2625300PE", token="T1",
+                            product=ProductType.INTRADAY, net_quantity=0, buy_quantity=975, sell_quantity=975,
+                            buy_average=103.01, sell_average=101.48, pnl=pnl)
+
+        p.trades._reconcile_pnl(sync, [pos(-1491.75)])
+        assert not env.types("PNL_MISMATCH")
+        for _ in range(3):  # a real gap (a missing fill): reported, but once, not every poll
+            p.trades._reconcile_pnl(sync, [pos(-1000.0)])
+        assert len(env.types("PNL_MISMATCH")) == 1
+    finally:
+        await p.stop()
+
+
+async def test_booked_tp_profit_counts_in_pnl_check_limits_and_totals(tmp_path):
+    """Real case (16-Nov, paper): TP1 sold part of an open trade; the broker shows that profit as realised at once.
+    The platform left it out until the trade closed -> PNL_MISMATCH -7943 and too-low daily P&L for the limits."""
+    from types import SimpleNamespace
+
+    from brokers.base import Exchange, OrderStatus, Position, ProductType
+
+    env = await build_env(tmp_path)
+    try:
+        p = env.platform
+        tm = p.trades
+        _, sync = p.accounts[env.account_id].shadow()
+        lt = SimpleNamespace(id=900, ref="T900", token="T9", account_id=env.account_id, mode="paper", instance_id=None,
+                             status="OPEN", partial_busy=False, entry_price=80.0, open_qty=390, entry_qty=650,
+                             option_series="X", partials=[{"label": "TP1", "filled": 260, "price": 100.0}])
+        tm.live[900] = lt
+        assert tm.booked(lt) == 260 * 20.0
+        # broker: 260 sold at 100 (realised +5200) + 390 still held at ltp 90 (+3900)
+        pos = Position(exchange=Exchange.NFO, tradingsymbol="NIFTY25250PE", token="T9", product=ProductType.INTRADAY,
+                       net_quantity=390, buy_quantity=650, sell_quantity=260, ltp=90.0, pnl=9100.0)
+        tm._reconcile_pnl(sync, [pos])
+        assert not env.types("PNL_MISMATCH") and tm.recon[(env.account_id, True)]["T9"] == 0
+        p.market.ltp = lambda key: 90.0
+        assert tm.open_pnl(lt) == 9100.0 and tm.daily_pnl(p.clock.now().date()) == 9100.0  # limits see it
+
+        # an order of ours filling on that strike: the broker is a moment ahead -> no alarm
+        sync.orders["X1"] = SimpleNamespace(token="T9", status=OrderStatus.OPEN, exchange_time=None, placed_at=None)
+        tm._reconcile_pnl(sync, [pos.model_copy(update={"pnl": 0.0})])
+        assert not env.types("PNL_MISMATCH")
+        # a resting protective stop does not switch the check off
+        sync.orders["X1"].status = OrderStatus.TRIGGER_PENDING
+        tm._reconcile_pnl(sync, [pos.model_copy(update={"pnl": 0.0})])
+        assert len(env.types("PNL_MISMATCH")) == 1
+        del sync.orders["X1"]
+        tm.live.pop(900)
+    finally:
+        await p.stop()

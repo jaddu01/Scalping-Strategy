@@ -180,7 +180,7 @@ async def compare_page(request: Request, user: SessionInfo = Depends(current_use
             if lt.instance_id is None:
                 continue
             q, u = open_pos.get(lt.instance_id, (0, 0.0))
-            open_pos[lt.instance_id] = (q + lt.open_qty, u + p.trades.unrealized(lt))
+            open_pos[lt.instance_id] = (q + lt.open_qty, u + p.trades.open_pnl(lt))
     rows = compare_rows(instances, trades, accounts, status, open_pos)
     names = usernames(db)
     owner_of = {i.id: i.owner_user_id for i in instances}

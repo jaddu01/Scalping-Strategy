@@ -102,7 +102,8 @@ class TradeManager:
         self.realized_today: dict[int, tuple[int | None, int, float]] = {}  # trade id -> (instance, account, gross)
         self.trade_counts: dict[int, int] = {}  # instance id -> trades today
         self.recon: dict[tuple[int, bool], dict[str, float]] = {}  # (account, paper) -> token -> diff
-        self._recon_logged: dict[tuple[int, bool, str], datetime] = {}
+        self.recon_bad: dict[tuple[int, bool], set[str]] = {}  # tokens whose diff is a real mismatch
+        self._recon_logged: dict[tuple[int, bool, str], float] = {}
         # manual exits at the broker, per (account, paper, token): when a manual SELL was seen, and how many
         # position polls in a row showed less than the platform's open trades hold
         self._ext_sell_at: dict[tuple[int, bool, str], datetime] = {}
@@ -172,10 +173,26 @@ class TradeManager:
                 OrderRecord.placed_at >= start)) or 0
 
     def unrealized(self, lt: LiveTrade) -> float:
+        """P&L of the quantity still held (at the current premium)."""
         ltp = self.market.ltp(lt.option_series)
         if ltp is None or not lt.open_qty:
             return 0.0
         return (ltp - lt.entry_price) * lt.open_qty
+
+    @staticmethod
+    def booked(lt: LiveTrade) -> float:
+        """P&L already realised by TP1 / TP2 partial sells of a trade that is still open."""
+        return sum((p["price"] - lt.entry_price) * p["filled"] for p in lt.partials
+                   if p.get("filled") and p.get("price") is not None)
+
+    @staticmethod
+    def sold_value(lt: LiveTrade) -> float:
+        return sum(p["price"] * p["filled"] for p in lt.partials if p.get("filled") and p.get("price") is not None)
+
+    def open_pnl(self, lt: LiveTrade) -> float:
+        """An open trade's whole P&L so far: partial sells already booked + the rest at the current premium.
+        (The broker counts the booked part as realised the moment it fills; so must every total of ours.)"""
+        return self.unrealized(lt) + self.booked(lt)
 
     def daily_pnl(self, day: date, instance_id: int | None = None, account_id: int | None = None) -> float:
         self._roll_day()
@@ -185,7 +202,7 @@ class TradeManager:
                 total += gross
         for lt in self.live.values():
             if (instance_id is None or lt.instance_id == instance_id) and (account_id is None or lt.account_id == account_id):
-                total += self.unrealized(lt)
+                total += self.open_pnl(lt)  # booked TP profit counts towards the daily limits at once
         return round(total, 2)
 
     # ------------------------------------------------------------------ entry
@@ -835,11 +852,30 @@ class TradeManager:
                        Level.WARNING, lt=lt, reason="manual_exit_at_broker")
             await self._finalize(lt, "manual_exit_at_broker", sync)
 
+    def _order_just_filled(self, sync: BrokerSync, token: str, within_sec: float = 15) -> bool:
+        """An order on this strike is filling, or filled moments ago: the broker's P&L is ahead of our books."""
+        now = self.clock.now()
+        for o in list(sync.orders.values()):
+            if o.token != token or o.status in (OrderStatus.TRIGGER_PENDING, OrderStatus.REJECTED,
+                                                OrderStatus.CANCELLED):
+                continue  # a resting stop-loss does not move the P&L
+            if o.status is not OrderStatus.COMPLETE:
+                return True
+            for t in (o.exchange_time, o.placed_at):
+                if t is None:
+                    continue
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=now.tzinfo)
+                if abs((now - t).total_seconds()) < within_sec:
+                    return True
+        return False
+
     def _reconcile_pnl(self, sync: BrokerSync, positions: list[Position]) -> None:
         """Compare platform P&L with the broker's per-symbol P&L where all activity is ours."""
         today = self.clock.now().date()
         key = (sync.account_id, sync.paper)
         diffs: dict[str, float] = {}
+        bad: set[str] = set()
         with self.db.session() as s:
             ext_tokens = set(s.scalars(select(OrderRecord.token).where(
                 OrderRecord.account_id == sync.account_id, OrderRecord.paper == sync.paper,
@@ -858,25 +894,35 @@ class TradeManager:
                 involved = True
                 if t.status == "CLOSED" and t.gross_pnl is not None:
                     platform += t.gross_pnl
+            busy = False
             for lt in self.live.values():
                 if lt.token == pos.token and lt.account_id == sync.account_id and (lt.mode == "paper") == sync.paper:
                     involved = True
+                    busy = busy or lt.partial_busy or lt.status == "EXITING"
                     ltp = pos.ltp or self.market.ltp(lt.option_series) or lt.entry_price
-                    platform += (ltp - lt.entry_price) * lt.open_qty
+                    platform += (ltp - lt.entry_price) * lt.open_qty + self.booked(lt)
             if not involved:
                 continue
+            if busy or self._order_just_filled(sync, pos.token):
+                continue  # an order of ours is filling / being booked: the broker is a moment ahead, not a mismatch
             diff = round(platform - pos.pnl, 2)
             diffs[pos.token] = diff
-            if abs(diff) > tol:
+            # The broker works out a line's P&L from its buy / sell AVERAGE prices rounded to 2 decimals, so with
+            # fills at mixed prices it is off by up to 0.005 x quantity per side (e.g. 6.50 on 975 + 975 units).
+            # Our figure is from the exact fills; that rounding is not a mismatch.
+            rounding = 0.01 * (pos.buy_quantity + pos.sell_quantity) / 2 + 0.01
+            if abs(diff) > max(tol, rounding):
+                bad.add(pos.token)
                 lk = (sync.account_id, sync.paper, pos.token)
-                last = self._recon_logged.get(lk)
-                if last is None or (self.clock.now() - last).total_seconds() > 60:
-                    self._recon_logged[lk] = self.clock.now()
+                # once per distinct difference (not every minute, all evening, for the same closed figure)
+                if self._recon_logged.get(lk) != diff:
+                    self._recon_logged[lk] = diff
                     self.bus.emit(Category.RISK, "PNL_MISMATCH",
                                   f"{pos.tradingsymbol}: platform {platform:.2f} vs broker {pos.pnl:.2f} (diff {diff:+.2f})",
                                   Level.WARNING, account_id=sync.account_id, account_label=sync.account_label,
                                   platform=round(platform, 2), broker=pos.pnl, diff=diff, symbol=pos.tradingsymbol)
         self.recon[key] = diffs
+        self.recon_bad[key] = bad
 
     def mtm_snapshot(self, st: ExitState) -> None:
         lt = self.live.get(st.trade_db_id)
@@ -1078,14 +1124,15 @@ class TradeManager:
             except Exception:
                 pass
             diff = self.recon.get((lt.account_id, lt.mode == "paper"), {}).get(lt.token)
-            charges = option_charges(self.settings().charges, lt.entry_price * lt.open_qty,
-                                     (ltp or lt.entry_price) * lt.open_qty).total
+            booked = self.booked(lt)
+            charges = option_charges(self.settings().charges, lt.entry_price * lt.entry_qty,
+                                     (ltp or lt.entry_price) * lt.open_qty + self.sold_value(lt)).total
             out.append({
                 "id": lt.id, "trade_ref": lt.ref, "instance_id": lt.instance_id, "instance_name": lt.instance_name,
                 "account_id": lt.account_id, "account_label": lt.account_label, "mode": lt.mode,
                 "direction": lt.direction, "symbol": lt.symbol, "qty": lt.open_qty, "lots": lt.lots,
-                "entry_price": lt.entry_price, "ltp": ltp, "unrealized": unreal,
-                "net_estimate": round(unreal - charges, 2) if unreal is not None else None,
+                "entry_price": lt.entry_price, "ltp": ltp, "unrealized": unreal, "booked": round(booked, 2),
+                "net_estimate": round(unreal + booked - charges, 2) if unreal is not None else None,
                 "spot": spot, "spot_sl": lt.spot_sl, "spot_sl_side": lt.spot_sl_side, "sl_distance": sl_dist,
                 "protective_sl_order_id": lt.protective_sl_order_id, "protective_sl_trigger": lt.protective_sl_trigger,
                 "protective_sl_status": lt.protective_sl_status,
@@ -1094,7 +1141,7 @@ class TradeManager:
                 "tp_distance": tp_dist, "exit_at": lt.exit_at.isoformat(),
                 "seconds_to_exit": max(0, int((lt.exit_at - now).total_seconds())), "status": lt.status,
                 "broker_pnl": broker_pnl, "pnl_diff": diff,
-                "mismatch": diff is not None and abs(diff) > self.settings().sync.pnl_tolerance,
+                "mismatch": lt.token in self.recon_bad.get((lt.account_id, lt.mode == "paper"), set()),
             })
         return out
 

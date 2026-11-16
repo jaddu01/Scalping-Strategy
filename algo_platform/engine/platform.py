@@ -460,9 +460,10 @@ class Platform:
                 b["realized"] += r.gross_pnl or 0.0
                 b["net"] += r.net_pnl or 0.0
         for lt in (self.trades.live.values() if day == today else ()):
-            u = self.trades.unrealized(lt)
-            ch = option_charges(self.settings.charges, lt.entry_price * lt.open_qty,
-                                (self.market.ltp(lt.option_series) or lt.entry_price) * lt.open_qty).total
+            u = self.trades.open_pnl(lt)  # incl. TP1 / TP2 sells already booked
+            ch = option_charges(self.settings.charges, lt.entry_price * lt.entry_qty,
+                                (self.market.ltp(lt.option_series) or lt.entry_price) * lt.open_qty
+                                + self.trades.sold_value(lt)).total
             for bucket, k in ((per_inst, lt.instance_id or 0), (per_acc, lt.account_id)):
                 b = bucket.setdefault(k, {"trades": 0, "realized": 0.0, "net": 0.0, "unrealized": 0.0})
                 b["unrealized"] += u
