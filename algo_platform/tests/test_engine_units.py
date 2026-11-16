@@ -322,3 +322,32 @@ async def test_strategy_start_waits_for_instrument_list():
     calls["sub"] = -10  # never loads: gives up with the real error after the last attempt
     with pytest.raises(InstrumentNotFound):
         await InstanceRuntime._start_strategy(rt, attempts=3, delay=0)
+
+
+async def test_open_paper_trades_never_block_a_live_order(tmp_path):
+    """16-Nov: five open paper trades filled the platform cap of 5 and every live signal was rejected."""
+    from types import SimpleNamespace
+    env = await build_env(tmp_path, instances=[{"name": "R"}])
+    try:
+        p = env.platform
+        acc = p.accounts[env.account_id]
+        rt = p.strategies.runtimes[env.instance_ids[0]]
+        p.settings.risk.max_open_positions = 5
+        acc.risk.max_open_positions = 5
+        for i in range(5):  # five other runs sit in paper trades on the same account
+            p.trades.live[9000 + i] = SimpleNamespace(instance_id=100 + i, account_id=acc.id, mode="paper")
+        p.trades.daily_pnl = lambda *a, **k: 0.0
+        check = lambda mode: p.risk.check_entry(instance_id=rt.instance_id, limits=rt.risk_limits, account=acc,
+                                                mode=mode, lots=5, quantity=325, premium=100)
+        assert check("live").ok  # paper positions don't count against a live order
+        d = check("paper")
+        assert not d.ok and d.level == "global"  # ... but still cap more paper trades
+        p.settings.risk.max_open_positions = 100
+        d = check("paper")
+        assert not d.ok and d.level == "account"  # the account cap counts the same way
+        assert check("live").ok
+        assert p.trades.open_trade_count(mode="paper") == 5 and p.trades.open_trade_count(mode="live") == 0
+        assert p.trades.open_trade_count() == 5
+    finally:
+        p.trades.live.clear()
+        await env.platform.stop()

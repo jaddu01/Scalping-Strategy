@@ -131,6 +131,15 @@ async def test_long_sweep_mss_fvg_entry_stop_target():
     assert ctx.stop_updates == []
     await s.on_tick(tick(x.one_r))
     await s.on_tick(tick(x.one_r + 5))
+    lock = round(24115 + 0.3 * (x.one_r - 24115), 2)  # default: entry + 0.3R is locked
+    assert ctx.stop_updates == [("T1", lock)] and lock > 24115
+    assert "entry + 0.3R" in [e for e in ctx.events if e["type"] == "BREAKEVEN"][0]["message"]
+
+
+async def test_breakeven_lock_zero_is_exact_entry():
+    ctx, s = await started(breakeven_lock_r=0)
+    await play(ctx, s)
+    await s.on_tick(tick(s.setups[0].one_r))
     assert ctx.stop_updates == [("T1", 24115)]
 
 
@@ -216,7 +225,7 @@ async def test_restart_keeps_open_trade_and_drops_unfinished_ideas():
     s2.restore([TradeInfo(trade_id="T1", slot_id=x.slot_id, direction="CE_BUY", status="OPEN")])
     assert [y.state for y in s2.setups] == ["IN_TRADE", "EXPIRED"] and s2.setups[1].result == "app_restarted"
     await s2.on_tick(tick(x.one_r))
-    assert ctx.stop_updates == [("T1", 24115)]  # breakeven still managed after the restart
+    assert ctx.stop_updates == [("T1", round(24115 + 0.3 * (x.one_r - 24115), 2))]  # still managed after the restart
 
 
 def test_setups_table_renders():

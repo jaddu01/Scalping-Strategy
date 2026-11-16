@@ -148,10 +148,13 @@ class TradeManager:
             self.load_today()
 
     # ------------------------------------------------------------------ metrics used by risk + UI
-    def open_trade_count(self, instance_id: int | None = None, account_id: int | None = None) -> int:
+    def open_trade_count(self, instance_id: int | None = None, account_id: int | None = None,
+                         mode: str | None = None) -> int:
+        """Open trades, optionally only one run's, one account's or one mode's (paper / live)."""
         return sum(1 for lt in self.live.values()
                    if (instance_id is None or lt.instance_id == instance_id)
-                   and (account_id is None or lt.account_id == account_id))
+                   and (account_id is None or lt.account_id == account_id)
+                   and (mode is None or lt.mode == mode))
 
     def trades_today(self, instance_id: int) -> int:
         self._roll_day()

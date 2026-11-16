@@ -60,7 +60,8 @@ class RiskManager:
             return RiskDecision(False, "global", "global kill switch is active")
         if self.global_blocked_reason:
             return RiskDecision(False, "global", self.global_blocked_reason)
-        if self.trades.open_trade_count() >= g.max_open_positions:
+        # paper and live are counted apart: open paper tests never block a real order (and the other way round)
+        if self.trades.open_trade_count(mode=mode) >= g.max_open_positions:
             return RiskDecision(False, "global", f"max open positions ({g.max_open_positions}) reached")
         gp = self.trades.daily_pnl(today)
         if g.max_daily_loss and gp <= -g.max_daily_loss:
@@ -75,7 +76,7 @@ class RiskManager:
         if account.status != "CONNECTED":
             return RiskDecision(False, "account", f"{account.label} is {account.status}")
         ar = account.risk
-        if self.trades.open_trade_count(account_id=account.id) >= ar.max_open_positions:
+        if self.trades.open_trade_count(account_id=account.id, mode=mode) >= ar.max_open_positions:
             return RiskDecision(False, "account", f"account max open positions ({ar.max_open_positions}) reached")
         ap = self.trades.daily_pnl(today, account_id=account.id)
         if ar.max_daily_loss and ap <= -ar.max_daily_loss:
