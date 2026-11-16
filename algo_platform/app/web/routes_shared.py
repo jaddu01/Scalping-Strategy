@@ -9,7 +9,7 @@ from fastapi.responses import HTMLResponse, Response
 from pydantic import ValidationError
 from sqlalchemy import select
 
-from app.auth.access import can_control, can_trade, require_trader, usernames
+from app.auth.access import can_control, can_trade, request_scope, require_trader, usernames
 from app.auth.deps import SessionInfo, audit, current_user
 from app.web.forms import errors_by_field, parse_form
 from app.web.render import redirect, render
@@ -72,7 +72,10 @@ async def shared_detail(sid: int, request: Request, user: SessionInfo = Depends(
         accounts = {a.id: a.label for a in s.scalars(select(BrokerAccount))}
     today = p.day_summary()["instances"] if p is not None else {}
     runs = []
+    sc = request_scope(request, user)
     for r in _runs(request, sid):
+        if not sc.instance(r.id):
+            continue  # other partners' runs of these rules are private
         rt = p.strategies.runtimes.get(r.id) if p else None
         b = today.get(r.id, {})
         runs.append({"row": r, "owner": names.get(r.owner_user_id or 0, "–"),

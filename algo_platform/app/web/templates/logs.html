@@ -1,7 +1,9 @@
 {% extends "base.html" %}
+{% import "macros.html" as m with context %}
 {% block title %}Logs{% endblock %}
 {% block content %}
 <div class="row" style="margin-bottom:12px"><h1 style="margin:0">Logs</h1><div class="spacer"></div>
+  {% if owners %}{{ m.owner_filter(owners, owner) }}{% endif %}
   <a class="btn" id="log-export-csv" href="/api/events/export?fmt=csv">Export CSV</a><a class="btn" id="log-export-json" href="/api/events/export?fmt=json">Export JSON</a></div>
 <div class="filters">
   <div class="field"><label>Date</label><input type="date" id="log-day" value="{{ q.get('day', '') }}"></div>

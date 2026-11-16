@@ -103,6 +103,10 @@ class TradeManager:
         self.trade_counts: dict[int, int] = {}  # instance id -> trades today
         self.recon: dict[tuple[int, bool], dict[str, float]] = {}  # (account, paper) -> token -> diff
         self._recon_logged: dict[tuple[int, bool, str], datetime] = {}
+        # manual exits at the broker, per (account, paper, token): when a manual SELL was seen, and how many
+        # position polls in a row showed less than the platform's open trades hold
+        self._ext_sell_at: dict[tuple[int, bool, str], datetime] = {}
+        self._short_obs: dict[tuple[int, bool, str], int] = {}
         self._day: date | None = None
         self.on_trade_event: Callable[[int, TradeInfo], None] | None = None
         exits.trades = self
@@ -455,8 +459,11 @@ class TradeManager:
             qty = lt.open_qty
             pos = sync.position_for(lt.token)
             fresh = sync.positions_at is not None and (self.clock.now() - sync.positions_at).total_seconds() < 15
-            if pos is not None and fresh and 0 <= pos.net_quantity < qty and not lt.mode == "paper":
-                qty = pos.net_quantity
+            if pos is not None and fresh and not lt.mode == "paper":
+                # several runs can hold the same strike: the others' open quantity is not ours to sell
+                others = sum(t.open_qty for t in self.live.values() if t is not lt and t.status == "OPEN"
+                             and t.token == lt.token and t.account_id == lt.account_id and t.mode == lt.mode)
+                qty = max(0, min(qty, pos.net_quantity - others))
             if qty <= 0:
                 await self._finalize(lt, "manual_exit_at_broker", sync)
                 return True
@@ -733,7 +740,9 @@ class TradeManager:
         elif rec.is_external and o.status is OrderStatus.COMPLETE and o.side is Side.SELL:
             if any(t.token == o.token and t.account_id == sync.account_id and (t.mode == "paper") == sync.paper
                    for t in self.live.values()):
-                loop.create_task(sync.poll_once(full=True))  # positions listener confirms the manual exit
+                # a confirmed manual SELL: the next position poll settles every affected trade at once
+                self._ext_sell_at[(sync.account_id, sync.paper, o.token)] = self.clock.now()
+                loop.create_task(sync.poll_once(full=True))
 
     async def _protective_filled(self, trade_db_id: int, o: Order) -> None:
         lt = self.live.get(trade_db_id)
@@ -752,32 +761,44 @@ class TradeManager:
 
     def on_positions(self, sync: BrokerSync, positions: list[Position]) -> None:
         mine = [t for t in self.live.values() if t.account_id == sync.account_id and (t.mode == "paper") == sync.paper]
-        if mine:
-            by_token: dict[str, list[LiveTrade]] = {}
-            for t in mine:
-                by_token.setdefault(t.token, []).append(t)
-            now = self.clock.now()
-            for token, trades in by_token.items():
-                if any(t.partial_busy for t in trades):
-                    continue  # a TP1/TP2 sell is in flight; quantities settle once it fills
-                expected = sum(t.open_qty for t in trades if t.status == "OPEN")
-                if expected <= 0:
-                    continue
-                pos = sync.position_for(token)
-                actual = pos.net_quantity if pos else 0
-                if actual >= expected:
-                    for t in trades:
-                        t.missing_obs = 0
-                    continue
-                # Only trust a shortfall after it has been seen twice and the trade has settled
-                trades.sort(key=lambda t: t.entry_time or now, reverse=True)
-                for t in trades:
-                    if t.status != "OPEN" or (t.entry_time and (now - t.entry_time).total_seconds() < 5):
-                        continue
-                    t.missing_obs += 1
-                    if t.missing_obs >= 2:
-                        asyncio.get_running_loop().create_task(self._manual_exit(t.id, max(0, actual)))
+        by_token: dict[str, list[LiveTrade]] = {}
+        for t in mine:
+            by_token.setdefault(t.token, []).append(t)
+        now = self.clock.now()
+        for token, trades in by_token.items():
+            key = (sync.account_id, sync.paper, token)
+            if any(t.partial_busy or t.status == "EXITING" for t in trades):
+                continue  # our own sell is in flight; quantities settle once it fills
+            expected = sum(t.open_qty for t in trades if t.status == "OPEN")
+            if expected <= 0:
+                continue
+            pos = sync.position_for(token)
+            actual = max(0, pos.net_quantity if pos else 0)
+            if actual >= expected:
+                self._short_obs.pop(key, None)
+                continue
+            # trades younger than 5s may simply not be in the broker's positions yet
+            settled = [t for t in trades if t.status == "OPEN"
+                       and not (t.entry_time and (now - t.entry_time).total_seconds() < 5)]
+            if not settled:
+                continue
+            seen = self._ext_sell_at.get(key)
+            confirmed = seen is not None and (now - seen).total_seconds() < 120
+            self._short_obs[key] = self._short_obs.get(key, 0) + 1
+            # a shortfall is trusted at once after a manual SELL was seen, otherwise after two polls in a row
+            if not confirmed and self._short_obs[key] < 2:
+                continue
+            self._short_obs.pop(key, None)
+            self._ext_sell_at.pop(key, None)
+            # the newest trades are closed first; every trade the sale covers is settled in this one pass
+            short = expected - actual
+            loop = asyncio.get_running_loop()
+            for t in sorted(settled, key=lambda t: (t.entry_time or now, t.id), reverse=True):
+                if short <= 0:
                     break
+                keep = max(0, t.open_qty - short)
+                short -= t.open_qty - keep
+                loop.create_task(self._manual_exit(t.id, keep))
         self._reconcile_pnl(sync, positions)
 
     async def _manual_exit(self, trade_db_id: int, broker_qty: int) -> None:

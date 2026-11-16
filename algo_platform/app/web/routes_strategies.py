@@ -8,7 +8,7 @@ from fastapi.responses import HTMLResponse, Response
 from pydantic import ValidationError
 from sqlalchemy import select
 
-from app.auth.access import (can_control, instance_for_control, is_admin, owner_choices, owner_filter,
+from app.auth.access import (require_visible, can_control, instance_for_control, is_admin, owner_choices, owner_filter,
                              require_trader, resolve_owner, usernames)
 from app.auth.deps import SessionInfo, audit, current_user
 from app.web.forms import build_fields, errors_by_field, parse_form
@@ -115,7 +115,9 @@ async def list_instances(request: Request, user: SessionInfo = Depends(current_u
             by_strategy.setdefault(it["row"].strategy_id, []).append(it)
     groups = [{"s": sh, "runs": by_strategy.get(sh.id, []), "rules_by": names.get(sh.created_by or 0, "admin"),
                "mine": any(it["row"].owner_user_id == user.user_id for it in by_strategy.get(sh.id, [])),
-               "can_edit_rules": can_control(user, sh.created_by)} for sh in shared]
+               "can_edit_rules": can_control(user, sh.created_by)} for sh in shared
+              # someone else's rules with none of the viewer's runs are not listed (private to that partner)
+              if owner_id is None or by_strategy.get(sh.id) or sh.created_by == owner_id]
     known = {sh.id for sh in shared}
     standalone = [it for it in items if it["row"].strategy_id not in known]
     return render(request, "strategies.html", {"groups": groups, "standalone": standalone, "owner": owner_val,
@@ -347,6 +349,7 @@ async def instance_detail(iid: int, request: Request, user: SessionInfo = Depend
         row = s.get(StrategyInstance, iid)
         if row is None:
             raise HTTPException(404, "instance not found")
+        require_visible(user, row.owner_user_id)
         s.expunge(row)
         acc = s.get(BrokerAccount, row.broker_account_id) if row.broker_account_id else None
         today = (p.clock.now() if p else None)
@@ -371,6 +374,9 @@ async def instance_detail(iid: int, request: Request, user: SessionInfo = Depend
 @router.get("/strategies/{iid}/slots", response_class=HTMLResponse)
 async def instance_slots(iid: int, request: Request, user: SessionInfo = Depends(current_user)) -> HTMLResponse:
     """HTMX partial: today's slots, refreshed every few seconds."""
+    with request.app.state.db.session() as s:
+        row = s.get(StrategyInstance, iid)
+        require_visible(user, row.owner_user_id if row else None)
     p = request.app.state.platform
     rt = p.strategies.runtimes.get(iid) if p else None
     snap = rt.snapshot() if rt else None

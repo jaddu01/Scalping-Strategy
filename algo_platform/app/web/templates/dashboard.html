@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "macros.html" as m with context %}
 {% block title %}Dashboard{% endblock %}
 {% block content %}
 <div id="dashboard">
@@ -11,6 +12,7 @@
         <button class="small" type="button" id="day-next" title="Next day" aria-label="Next day">›</button>
         <button class="small" type="button" id="day-today">Today</button>
       </div>
+      {% if owners %}{{ m.owner_filter(owners, owner) }}{% endif %}
       <span class="muted">Global kill switch: <span id="gk-state">–</span></span>
       {% if is_admin %}<button class="danger solid kill" data-kill="global">■ GLOBAL KILL SWITCH</button>{% endif %}
     </div>
@@ -18,7 +20,7 @@
   {% if snap is none %}<div class="flash err">The trading engine is not running (ALGO_DISABLE_ENGINE is set).</div>{% endif %}
   <div id="day-note" class="flash ok small" hidden></div>
   <div class="cards day-data">
-    <div class="card"><div class="k"><span class="day-label">Today's</span> gross P&amp;L (all accounts)</div><div class="v" id="tot-gross"><span class="spinner"></span></div></div>
+    <div class="card"><div class="k"><span class="day-label">Today's</span> gross P&amp;L ({{ 'all accounts' if owner == 'all' else 'your accounts' }})</div><div class="v" id="tot-gross"><span class="spinner"></span></div></div>
     <div class="card"><div class="k">Estimated net after charges</div><div class="v" id="tot-net"><span class="spinner"></span></div></div>
     <div class="card"><div class="k">Trades <span class="day-label-lc">today</span></div><div class="v" id="tot-trades"><span class="spinner"></span></div></div>
     <div class="card"><div class="k">Open positions (now)</div><div class="v" id="tot-open"><span class="spinner"></span></div></div>

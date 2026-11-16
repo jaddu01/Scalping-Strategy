@@ -112,12 +112,19 @@ def test_partner_owns_and_controls_only_their_own(client):
     form = c.get("/strategies/new").text
     assert "Chetan Angel" in form and "Bina Angel" not in form
 
-    # he can SEE Bina's things ...
-    assert c.get(f"/strategies/{sb.id}").status_code == 200
-    page = c.get("/strategies").text
-    assert "Bina Breakout" in page and "Chetan Breakout" in page
-    assert "Bina Angel" in c.get("/accounts").text
-    # ... but every change is refused
+    # he sees only his own things: Bina's strategy, account and P&L are private ...
+    assert c.get(f"/strategies/{sb.id}").status_code == 404
+    assert c.get(f"/strategies/{sb.id}/slots").status_code == 404
+    assert c.get(f"/api/instances/{sb.id}/detail").status_code == 404
+    page = c.get("/strategies?owner=all").text  # a partner cannot widen the filter
+    assert "Bina Breakout" not in page and "Chetan Breakout" in page
+    assert "Bina Angel" not in c.get("/accounts?owner=all").text
+    st = c.get("/api/state?owner=all").json()
+    assert {i["name"] for i in st["instances"]} == {"Chetan Breakout"}
+    assert {a["label"] for a in st["accounts"]} == {"Chetan Angel"}
+    assert "Bina" not in c.get("/compare?owner=all&show=all").text
+    assert all(e["account_id"] in (None, acc_c) for e in c.get("/api/events?owner=all").json()["events"])
+    # ... and every change is refused
     h = {"X-CSRF-Token": tc}
     for method, url in (("get", f"/strategies/{sb.id}/edit"), ("post", f"/strategies/{sb.id}/edit"),
                         ("post", f"/strategies/{sb.id}/delete"), ("get", f"/accounts/{acc_b}/edit"),
@@ -224,8 +231,12 @@ def test_admin_creates_for_a_partner_and_pages_render(client):
     for url in ("/", "/strategies?owner=all", f"/strategies?owner={uid(c, 'chetan')}", "/accounts?owner=me",
                 "/compare?owner=me", "/trades?owner=me", "/orders?owner=all", "/users", "/api/state"):
         assert c.get(url).status_code == 200, url
-    st = c.get("/api/state").json()
+    assert c.get("/api/state").json()["instances"] == []  # the admin's own view: nothing of Chetan's
+    st = c.get("/api/state?owner=all").json()
     assert st["instances"][0]["owner"] == "chetan" and st["accounts"][0]["owner"] == "chetan"
+    st = c.get(f"/api/state?owner={uid(c, 'chetan')}").json()
+    assert [i["name"] for i in st["instances"]] == ["For Chetan"]
+    assert c.get(f"/strategies/{strategy(c, 'For Chetan').id}").status_code == 200  # admin may open it
 
 
 def test_migration_gives_existing_data_to_the_first_admin(tmp_path):
@@ -341,6 +352,8 @@ def test_shared_strategy_each_partner_runs_it_on_own_terms(client):
     for url in ("/strategies", f"/strategies/shared/{sid}", f"/backtest?strategy_id={sid}", f"/strategies/{hers.id}"):
         assert c.get(url).status_code == 200, url
     page = c.get(f"/strategies/shared/{sid}").text
+    assert "Breakout – bina" not in page  # the admin's own view: only their run of these rules
+    page = c.get(f"/strategies/shared/{sid}?owner=all").text
     assert "Breakout – bina" in page and "bina" in page
     # a strategy with runs cannot be deleted
     r = c.post(f"/strategies/shared/{sid}/delete", data={"csrf_token": ta}, follow_redirects=False)

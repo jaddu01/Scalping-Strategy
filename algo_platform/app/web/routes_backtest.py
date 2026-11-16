@@ -60,6 +60,9 @@ async def backtest_page(request: Request, template: str = "nifty_ref_breakout", 
         with request.app.state.db.session() as s:
             inst = s.get(StrategyInstance, instance_id)
             if inst is not None:
+                from app.auth.access import require_visible
+
+                require_visible(user, inst.owner_user_id)
                 template = inst.template_id
                 params = get_template(template).settings_model.model_validate(inst.params or {})
     return render(request, "backtest.html", _ctx(request, template, params))

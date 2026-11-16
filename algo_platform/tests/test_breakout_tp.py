@@ -283,7 +283,9 @@ async def test_slots_route_shows_trade_points_and_tp_legs(tmp_path):
         app = FastAPI()
         app.state.platform, app.state.db = env.platform, env.db
         app.include_router(routes_strategies.router)
-        app.dependency_overrides[current_user] = lambda: None
+        from app.auth.security import SessionInfo
+
+        app.dependency_overrides[current_user] = lambda: SessionInfo("", 1, "admin", "admin", "", False, False)
         iid = env.instance_ids[0]
         lt = await _enter(env)
         env.option_price(23650, "CE", 120.0)  # TP1

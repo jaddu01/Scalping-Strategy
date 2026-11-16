@@ -6,6 +6,9 @@
   const csrf = () => ($('meta[name="csrf-token"]') || {}).content || "";
   const isAdmin = () => document.body.dataset.admin === "1";
   // admins control everything; a partner controls only what they own (the server checks this too)
+  // the admin's "Partner" filter (?owner=all / id) also applies to the live feed and the JSON calls
+  const owner = new URLSearchParams(location.search).get("owner");
+  const ownerQs = owner ? "owner=" + encodeURIComponent(owner) : "";
   const canControl = (ownerId) => isAdmin() || (document.body.dataset.trader === "1" && ownerId != null && String(ownerId) === document.body.dataset.uid);
   const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const num = (v, d = 2) => (v === null || v === undefined || v === "" || isNaN(v)) ? "–" : Number(v).toLocaleString("en-IN", { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -284,7 +287,7 @@
       }
       viewDay = d; dayData = null; dayUi(); setLoading(true);
       try {
-        const r = await withBusy(() => fetch("/api/day?date=" + encodeURIComponent(d), { credentials: "same-origin" }));
+        const r = await withBusy(() => fetch("/api/day?date=" + encodeURIComponent(d) + (ownerQs ? "&" + ownerQs : ""), { credentials: "same-origin" }));
         const j = await r.json().catch(() => ({}));
         if (viewDay !== d) return;  // another day was picked meanwhile
         if (!r.ok) throw new Error(j.detail || r.status);
@@ -337,7 +340,7 @@
   }
   async function loadHistory() {
     if (!logbox) return;
-    const f = logFilter(); const qs = new URLSearchParams(f); qs.set("limit", "1000");
+    const f = logFilter(); const qs = new URLSearchParams(f); qs.set("limit", "1000"); if (owner) qs.set("owner", owner);
     const df = $("#log-day")?.value; if (df) { qs.set("day_from", df); qs.set("day_to", df); }
     const r = await withBusy(() => fetch("/api/events?" + qs.toString(), { credentials: "same-origin" }));
     if (!r.ok) return;
@@ -346,7 +349,7 @@
     data.events.reverse().forEach((e) => appendLog(e));
     logbox.scrollTop = logbox.scrollHeight;
     const ex = $("#log-export-csv"), ej = $("#log-export-json");
-    const eqs = new URLSearchParams(f); if (df) { eqs.set("day_from", df); eqs.set("day_to", df); }
+    const eqs = new URLSearchParams(f); if (owner) eqs.set("owner", owner); if (df) { eqs.set("day_from", df); eqs.set("day_to", df); }
     if (ex) ex.href = "/api/events/export?fmt=csv&" + eqs.toString();
     if (ej) ej.href = "/api/events/export?fmt=json&" + eqs.toString();
   }
@@ -360,7 +363,7 @@
   let ws, backoff = 1000;
   function connect() {
     if (!document.body.dataset.user) return;
-    ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+    ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws" + (ownerQs ? "?" + ownerQs : ""));
     ws.onopen = () => { backoff = 1000; $("#ws-dot")?.classList.replace("red", "green"); };
     ws.onmessage = (m) => {
       let msg; try { msg = JSON.parse(m.data); } catch (e) { return; }

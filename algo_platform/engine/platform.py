@@ -485,7 +485,7 @@ class Platform:
                         if lt.account_id == acc.id and (lt.mode == "paper") == sync.paper}
                 for p in sync.positions:
                     if p.net_quantity != 0 and p.token not in mine:
-                        out.append({"account": acc.label, "paper": sync.paper, "symbol": p.tradingsymbol,
+                        out.append({"account": acc.label, "account_id": acc.id, "paper": sync.paper, "symbol": p.tradingsymbol,
                                     "qty": p.net_quantity, "avg": p.average_price, "ltp": p.ltp, "pnl": p.pnl})
         return out
 

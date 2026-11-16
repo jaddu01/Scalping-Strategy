@@ -290,3 +290,102 @@ async def test_no_protective_sl_by_default(tmp_path):
             assert s.get(Trade, t.id).exit_reason == "spot_stop_loss"
     finally:
         await env.platform.stop()
+
+
+async def _two_runs_same_strike(tmp_path):
+    env = await build_env(tmp_path, instances=[{"name": "A"}, {"name": "B"}])
+    env.ref_candle("09:45", 23639.20, 23609.20)
+    env.spot(23630.0)
+    env.option_price(23650, "CE", 100.0)
+    await env.at("09:50", 6)
+    await env.at("09:52", 31)
+    env.spot(23660.0)
+    await env.wait_for(lambda: len(env.platform.trades.live) == 2)
+    trades = list(env.platform.trades.live.values())
+    assert len({t.token for t in trades}) == 1  # both runs hold the same CE
+    await env.wait_for(lambda: all(t.protective_sl_status == "TRIGGER_PENDING" for t in trades))
+    paper, sync = env.platform.accounts[env.account_id].shadow()
+    return env, trades, paper, sync
+
+
+async def _sell_at_broker(env, paper, token, qty):
+    from brokers.base import Exchange, OrderRequest
+
+    inst = paper.find_instrument(Exchange.NFO, token)
+    await paper.place_order(OrderRequest(instrument=inst, side=Side.SELL, quantity=qty, order_type=OrderType.MARKET))
+
+
+async def test_one_manual_sell_closes_every_run_on_that_strike_at_once(tmp_path):
+    env, trades, paper, sync = await _two_runs_same_strike(tmp_path)
+    try:
+        await env.at("09:53", 0)
+        env.option_price(23650, "CE", 110.0)
+        await _sell_at_broker(env, paper, trades[0].token, sum(t.open_qty for t in trades))
+        await sync.poll_once(full=True)  # the order book shows the manual SELL ...
+        await env.settle(2)
+        await sync.poll_once(full=True)  # ... one position poll is then enough, for both trades
+        await env.settle(2)
+        await env.wait_for(lambda: not env.platform.trades.live)
+        with env.db.session() as s:
+            rows = list(s.scalars(select(Trade).order_by(Trade.id)))
+            sl = list(s.scalars(select(OrderRecord).where(OrderRecord.purpose == "PROTECTIVE_SL")))
+        assert [r.exit_reason for r in rows] == ["manual_exit_at_broker"] * 2
+        assert all(r.exit_price == 110.0 and r.open_quantity == 0 for r in rows)
+        assert {o.status for o in sl} == {"CANCELLED"}  # no leftover stop can sell into a short
+        assert not env.types("EXIT_FAILED")
+    finally:
+        await env.platform.stop()
+
+
+async def test_partial_manual_sell_closes_the_newest_run_only(tmp_path):
+    env, trades, paper, sync = await _two_runs_same_strike(tmp_path)
+    try:
+        await env.at("09:53", 0)
+        newest = max(trades, key=lambda t: (t.entry_time, t.id))
+        other = next(t for t in trades if t is not newest)
+        await _sell_at_broker(env, paper, newest.token, newest.open_qty)
+        for _ in range(2):
+            await sync.poll_once(full=True)
+            await env.settle(2)
+        await env.wait_for(lambda: list(env.platform.trades.live) == [other.id])
+        assert env.platform.trades.live[other.id].open_qty == other.entry_qty
+    finally:
+        await env.platform.stop()
+
+
+async def test_live_exit_never_sells_another_runs_share_of_a_strike(tmp_path):
+    """Live: the broker's quantity is shared by every open trade on that strike. If a manual SELL has not
+    been reconciled yet, our exit sells only what is left for this trade (never into a short)."""
+    env = await build_env(tmp_path, instances=[{"name": "A"}, {"name": "B"}], mode="live")
+    try:
+        env.ref_candle("09:45", 23639.20, 23609.20)
+        env.spot(23630.0)
+        env.option_price(23650, "CE", 100.0)
+        await env.at("09:50", 6)
+        await env.at("09:52", 31)
+        env.spot(23660.0)
+        await env.wait_for(lambda: len(env.platform.trades.live) == 2)
+        acc = env.platform.accounts[env.account_id]
+        sync = acc.live_sync
+        tm = env.platform.trades
+        a, b = sorted(tm.live.values(), key=lambda t: t.id)
+        await env.wait_for(lambda: sync.position_for(a.token) is not None
+                           and sync.position_for(a.token).net_quantity == a.open_qty + b.open_qty)
+        # the broker now holds one trade's quantity (a manual sale the platform has not settled yet)
+        sync.position_for(a.token).net_quantity = b.open_qty
+        sync.positions_at = env.clock.now()
+        sold = []
+        real_place = tm.orders.place
+
+        async def spy(adapter, s, req, **kw):
+            if kw.get("purpose") == "EXIT":
+                sold.append(req.quantity)
+            return await real_place(adapter, s, req, **kw)
+
+        tm.orders.place = spy
+        await tm.exit_trade(a.id, "manual_test")
+        assert sold == [] and env.types("EXIT")  # B's share is not sold; A is settled as a manual exit
+        with env.db.session() as s:
+            assert s.get(Trade, a.id).exit_reason == "manual_exit_at_broker"
+    finally:
+        await env.platform.stop()

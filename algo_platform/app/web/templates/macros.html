@@ -57,6 +57,7 @@
 {% endmacro %}
 
 {% macro owner_filter(owners, value, extra=None) %}
+  {% if is_admin %}
   <form method="get" class="owner-filter">
     {% for k, v in (extra or {}).items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
     <select name="owner" aria-label="Partner">
@@ -66,4 +67,5 @@
     </select>
     <button class="small" type="submit">Show</button>
   </form>
+  {% endif %}
 {% endmacro %}

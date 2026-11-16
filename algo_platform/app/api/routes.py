@@ -9,9 +9,10 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 
-from app.auth.access import account_for_control, instance_for_control, require_trader
+from app.auth.access import (Scope, account_for_control, instance_for_control, request_scope, require_trader,
+                             require_visible, scope_snapshot, scope_summary)
 from app.auth.deps import SessionInfo, audit, current_user, require_admin
 from core.clock import combine
 from storage.models import EventRecord, StrategyInstance, Trade
@@ -28,7 +29,7 @@ def _platform(request: Request) -> Any:
 
 @router.get("/state")
 async def state(request: Request, user: SessionInfo = Depends(current_user)) -> dict[str, Any]:
-    return _platform(request).snapshot()
+    return scope_snapshot(_platform(request).snapshot(), request_scope(request, user))
 
 
 @router.get("/day")
@@ -39,12 +40,16 @@ async def day_pnl(request: Request, day: date = Query(..., alias="date"),
     today = p.clock.now().date()
     if day > today:
         raise HTTPException(400, "pick today or an earlier day")
-    return {"date": day.isoformat(), "today": day == today, "summary": p.day_summary(day)}
+    return {"date": day.isoformat(), "today": day == today,
+            "summary": scope_summary(p.day_summary(day), request_scope(request, user))}
 
 
 @router.get("/instances/{instance_id}/detail")
 async def instance_detail(instance_id: int, request: Request, user: SessionInfo = Depends(current_user)) -> dict[str, Any]:
     p = _platform(request)
+    with request.app.state.db.session() as s:
+        row = s.get(StrategyInstance, instance_id)
+        require_visible(user, row.owner_user_id if row else None)
     return p.instance_detail(instance_id) or {"id": instance_id, "status": "STOPPED", "strategy": {}}
 
 
@@ -152,6 +157,14 @@ def _event_query(day_from: date | None, day_to: date | None, level: str | None, 
     return stmt
 
 
+def _scoped(stmt: Any, scope: Scope) -> Any:
+    """Only the viewer's accounts / strategies, plus market and system events (neither set)."""
+    if scope.everything:
+        return stmt
+    return stmt.where(or_(and_(EventRecord.account_id.is_(None), EventRecord.instance_id.is_(None)),
+                          EventRecord.account_id.in_(scope.accounts), EventRecord.instance_id.in_(scope.instances)))
+
+
 def _event_dict(e: EventRecord) -> dict[str, Any]:
     from core.clock import fmt_hms_ms
 
@@ -172,6 +185,7 @@ async def events(request: Request, user: SessionInfo = Depends(current_user), da
         p.db_sink.flush()
     stmt = _event_query(day_from, day_to, level or None, category or None, event_type or None, instance_id,
                         account_id, trade_id or None, q or None)
+    stmt = _scoped(stmt, request_scope(request, user))
     if before_id:
         stmt = stmt.where(EventRecord.id < before_id)
     with request.app.state.db.session() as s:
@@ -185,7 +199,8 @@ async def export_events(request: Request, user: SessionInfo = Depends(current_us
                         category: str | None = None, event_type: str | None = None, instance_id: int | None = None,
                         account_id: int | None = None, trade_id: str | None = None, q: str | None = None) -> Response:
     stmt = _event_query(day_from, day_to, level or None, category or None, event_type or None, instance_id,
-                        account_id, trade_id or None, q or None).order_by(EventRecord.id)
+                        account_id, trade_id or None, q or None)
+    stmt = _scoped(stmt, request_scope(request, user)).order_by(EventRecord.id)
     with request.app.state.db.session() as s:
         rows = [_event_dict(e) for e in s.scalars(stmt.limit(200000))]
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -241,6 +256,6 @@ async def timeline(trade_ref: str, request: Request, user: SessionInfo = Depends
     if p is not None and p.db_sink is not None:
         p.db_sink.flush()
     data = trade_timeline(request.app.state.db, trade_ref)
-    if not data:
+    if not data or not request_scope(request, user).trade(data["trade"]["account_id"], data["trade"]["instance_id"]):
         raise HTTPException(404, "trade not found")
     return json.loads(json.dumps(data, default=str))

@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, Response
 from sqlalchemy import select
 
 from app.api.routes import trade_timeline
-from app.auth.access import owner_choices, owner_filter
+from app.auth.access import is_admin, owner_choices, owner_filter, request_scope
 from app.auth.deps import SessionInfo, current_user
 from app.web.render import render
 from storage.models import BrokerAccount, OrderRecord, StrategyInstance, Trade
@@ -98,7 +98,7 @@ async def trades_page(request: Request, user: SessionInfo = Depends(current_user
               "charges": sum(b["charges"] for _, b in summ), "trades": sum(b["trades"] for _, b in summ)}
     return render(request, "trades.html", {"rows": rows, "f": f, "inst": inst, "acc": acc, "summary": summ,
                                            "totals": totals, "qs": request.url.query,
-                                           "owners": owner_choices(request.app.state.db)})
+                                           "owners": owner_choices(request.app.state.db) if is_admin(user) else []})
 
 
 @router.get("/trades.csv")
@@ -127,7 +127,7 @@ async def trade_view(trade_ref: str, request: Request, user: SessionInfo = Depen
     if p is not None and p.db_sink is not None:
         p.db_sink.flush()
     data = trade_timeline(request.app.state.db, trade_ref)
-    if not data:
+    if not data or not request_scope(request, user).trade(data["trade"]["account_id"], data["trade"]["instance_id"]):
         raise HTTPException(404, "trade not found")
     inst, acc = _lookups(request)
     with request.app.state.db.session() as s:
@@ -160,4 +160,4 @@ async def orders_page(request: Request, user: SessionInfo = Depends(current_user
     inst, acc = _lookups(request)
     return render(request, "orders.html", {"rows": rows, "f": f, "inst": inst, "acc": acc,
                                            "external": request.query_params.get("external") == "1",
-                                           "owners": owner_choices(request.app.state.db)})
+                                           "owners": owner_choices(request.app.state.db) if is_admin(user) else []})

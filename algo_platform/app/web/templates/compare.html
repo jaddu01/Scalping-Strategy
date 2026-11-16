@@ -12,9 +12,9 @@
     </select></div>
   <div class="field"><label>From (custom)</label><input type="date" name="day_from" value="{{ d_from }}"></div>
   <div class="field"><label>To (custom)</label><input type="date" name="day_to" value="{{ d_to }}"></div>
-  <div class="field"><label>Partner</label><select name="owner">
+  {% if is_admin %}<div class="field"><label>Partner</label><select name="owner">
     <option value="all" {{ 'selected' if owner == 'all' }}>All partners</option><option value="me" {{ 'selected' if owner == 'me' }}>Mine</option>
-    {% for uid, name in owners %}<option value="{{ uid }}" {{ 'selected' if owner == uid|string }}>{{ name }}</option>{% endfor %}</select></div>
+    {% for uid, name in owners %}<option value="{{ uid }}" {{ 'selected' if owner == uid|string }}>{{ name }}</option>{% endfor %}</select></div>{% endif %}
   <div class="field"><label>Mode</label><select name="mode"><option value="">all</option>
     <option {{ 'selected' if mode == 'paper' }}>paper</option><option {{ 'selected' if mode == 'live' }}>live</option></select></div>
   <div class="field"><label>Strategies</label><select name="show">
