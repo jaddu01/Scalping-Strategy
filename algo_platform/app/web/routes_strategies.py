@@ -68,9 +68,14 @@ def _form_ctx(request: Request, user: SessionInfo, template_id: str, values: dic
     rules_view = None
     if kind == "run" and shared is not None:
         own = set(personal_keys(cls.settings_model))
-        rules_view = {k: v for k, v in cls.settings_model.model_validate(
-            merged(cls.settings_model, shared.params, values.get("params") or {})).model_dump(mode="json").items()
-            if k not in own}
+        # the shared rules shown read-only: from the rules alone, so a run's invalid own values (being corrected
+        # on this very form) can never break the page
+        try:
+            shown = cls.settings_model.model_validate(merged(cls.settings_model, shared.params, {})).model_dump(
+                mode="json")
+        except ValidationError:
+            shown = dict(shared.params or {})
+        rules_view = {k: v for k, v in shown.items() if k not in own}
     return {
         "kind": kind, "shared": shared, "action": action, "cancel": cancel, "rules_view": rules_view,
         "templates_list": [(k, v.display_name) for k, v in all_templates().items() if not k.startswith("test_")],

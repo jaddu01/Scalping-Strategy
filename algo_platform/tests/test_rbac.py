@@ -380,3 +380,32 @@ def test_ema_lots_are_personal_and_tp_levels_are_rules(client):
     # the edit-rules page has no lots fields; the TP RSI levels are rules
     page = c.get(f"/strategies/shared/{run.strategy_id}/edit").text
     assert 'name="params.tp1_lots"' not in page and 'name="params.tp1_rsi"' in page
+
+
+def test_invalid_tp_lots_on_a_run_show_an_error_not_a_crash(client):
+    """17-Nov: editing a 2-Entry TP run to 4 TPs with TP lots 4/4/2/2 (12 > 10 lots) crashed the page (500): the
+    error re-render validated the same invalid values again for the read-only rules box."""
+    c = client
+    ta = as_user(c, "admin")
+    acc = add_account(c, ta, "Admin Angel")
+    r = c.post("/strategies/new?template=nifty_ref_breakout_tp", data={
+        **STRATEGY_FORM, "csrf_token": ta, "name": "TP run", "broker_account_id": str(acc), "params.lots": "10",
+        "params.tp_enabled": "on", "params.tp_basis": "premium_pct", "params.tp1_value": "20",
+        "params.tp2_value": "30", "params.tp1_lots": "4", "params.tp2_lots": "4"}, follow_redirects=False)
+    assert r.status_code == 303, r.text
+    run = strategy(c, "TP run")
+    base = {"csrf_token": ta, "name": "TP run", "broker_account_id": str(acc), "mode": "paper", "notes": "",
+            "risk.max_daily_loss": "0", "risk.max_daily_profit": "0", "risk.max_trades_per_day": "13",
+            "risk.max_lots_per_order": "20", "risk.max_premium_per_trade": "0",
+            "params.lots": "10", "params.tp_enabled": "on", "params.tp_basis": "premium_pct",
+            "params.tp1_value": "20", "params.tp2_value": "30", "params.tp_mode": "four_by_premium",
+            "params.tp_band1_max": "80", "params.tp_band2_max": "150", "params.tp_pcts_low": "20, 30, 40, 50",
+            "params.tp_pcts_mid": "15, 22, 30, 40", "params.tp_pcts_high": "8, 12, 20, 25"}
+    bad = {**base, "params.tp1_lots": "4", "params.tp2_lots": "4", "params.tp3_lots": "2", "params.tp4_lots": "2"}
+    r = c.post(f"/strategies/{run.id}/edit", data=bad, follow_redirects=False)
+    assert r.status_code == 400 and "more than Lots" in r.text
+    good = {**base, "params.tp1_lots": "3", "params.tp2_lots": "3", "params.tp3_lots": "2", "params.tp4_lots": "2"}
+    r = c.post(f"/strategies/{run.id}/edit", data=good, follow_redirects=False)
+    assert r.status_code == 303, r.text
+    p = strategy(c, "TP run").params
+    assert (p["tp_mode"], p["tp1_lots"], p["tp2_lots"], p["tp3_lots"], p["tp4_lots"]) == ("four_by_premium", 3, 3, 2, 2)
