@@ -108,6 +108,7 @@ class TradeManager:
         self._recon_logged: dict[tuple[int, bool, str], float] = {}
         # manual exits at the broker, per (account, paper, token): when a manual SELL was seen, and how many
         # position polls in a row showed less than the platform's open trades hold
+        self.partial_rearm_sec = 10.0  # a TP blocked by a manual order is re-armed after this
         self._ext_sell_at: dict[tuple[int, bool, str], datetime] = {}
         self._short_obs: dict[tuple[int, bool, str], int] = {}
         self._day: date | None = None
@@ -550,6 +551,43 @@ class TradeManager:
             await self._finalize(lt, reason, sync)
             return True
 
+    def _partial_blocked(self, lt: LiveTrade, p: dict[str, Any], qty: int) -> bool:
+        """A TP sell would be a short sale while manual SELL orders at the broker hold the quantity (see exit_trade):
+        no order, the same one-time alert, and the target re-arms after 10 s (it sells on the next tick at or
+        beyond its level once the manual order is gone)."""
+        try:
+            _, _, sync = self._route(lt)
+        except Exception:
+            return False  # the sell itself reports the missing route
+        manual = self._manual_sells(sync, lt.token)
+        if not manual:
+            return False
+        pos = sync.position_for(lt.token)
+        others = sum(t.open_qty for t in self.live.values() if t is not lt and t.status == "OPEN"
+                     and t.token == lt.token and t.account_id == lt.account_id and t.mode == lt.mode)
+        held = pos.net_quantity if pos is not None else lt.open_qty + others
+        reserved = sum(max(0, o.quantity - o.filled_quantity) for o in manual)
+        if held - reserved - others >= qty:
+            return False
+        ids = ",".join(sorted(o.order_id for o in manual))
+        if lt.blocked_by != ids:
+            lt.blocked_by = ids
+            desc = "; ".join(f"{o.order_id} SELL {o.quantity - o.filled_quantity} {o.order_type.value}"
+                             + (f" trigger {o.trigger_price:g}" if o.trigger_price else "")
+                             + (f" price {o.price:g}" if o.price else "") for o in manual)
+            self._emit(Category.RISK, "EXIT_BLOCKED_BY_MANUAL_ORDER",
+                       f"{p['label']}: cannot sell {qty} {lt.symbol} — manual order(s) at the broker hold the "
+                       f"position ({desc}). No sell is sent (it would be a short sale); cancel the manual order "
+                       f"and the target sells again while the price is at or beyond it", Level.CRITICAL, lt=lt,
+                       reason=p["label"], orders=[o.order_id for o in manual])
+
+        def rearm() -> None:
+            if lt.id in self.live and not p.get("filled"):
+                p["done"] = False
+
+        asyncio.get_running_loop().call_later(self.partial_rearm_sec, rearm)
+        return True
+
     @staticmethod
     def _manual_sells(sync: BrokerSync, token: str) -> list[Order]:
         """SELL orders on this strike still working at the broker that the platform did not place."""
@@ -594,6 +632,8 @@ class TradeManager:
                 return False
             qty = min(int(p["qty"]), lt.open_qty)
             if qty <= 0:
+                return False
+            if lt.mode != "paper" and self._partial_blocked(lt, p, qty):
                 return False
             lt.partial_busy = True
             try:

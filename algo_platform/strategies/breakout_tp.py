@@ -62,7 +62,9 @@ class TPSettings(BreakoutBaseSettings):
     tp_pcts_high: list[float] = Field(default_factory=lambda: [8.0, 12.0, 20.0, 25.0],
                                       title="4 TPs: % for the high band")
     tp3_lots: int = Field(0, ge=0, le=200, title="TP3 lots (4 TPs)",
-                          description="4 TPs: 0 for all of TP1-TP4 lots = automatic 30/30/20/20 % (10 -> 3/3/2/2)")
+                          description="4 TPs: TP3 and TP4 lots both 0 = automatic 30/30/20/20 % (10 -> 3/3/2/2; "
+                                      "TP1 / TP2 lots then stay the two-target split). Own split: set all of "
+                                      "TP1-TP4 lots")
     tp4_lots: int = Field(0, ge=0, le=200, title="TP4 lots (4 TPs)")
 
     @model_validator(mode="after")
@@ -94,14 +96,16 @@ class TPSettings(BreakoutBaseSettings):
             if any(p <= 0 for p in pcts) or any(b <= a for a, b in zip(pcts, pcts[1:])):
                 raise ValueError(f"4 TPs: the {name} band's percentages must be above 0 and rise TP1 < TP2 < TP3 < TP4")
         own = (self.tp1_lots, self.tp2_lots, self.tp3_lots, self.tp4_lots)
-        if any(own) and not all(own):
-            raise ValueError("4 TPs: set all of TP1-TP4 lots to 0 (automatic 3/3/2/2 of 10) or each to a number")
+        if (self.tp3_lots or self.tp4_lots) and not all(own):
+            raise ValueError("4 TPs: for your own split set each of TP1-TP4 lots (e.g. 3/3/2/2); "
+                             "TP3 and TP4 lots both 0 = automatic 3/3/2/2 of 10")
         if sum(self.split4()) > self.lots:
             raise ValueError(f"4 TPs: TP1-TP4 lots ({sum(self.split4())}) are more than Lots ({self.lots})")
         return self
 
     def split4(self) -> tuple[int, int, int, int]:
-        """TP1-TP4 lots; automatic = 30 / 30 / 20 / 20 % rounded down (10 -> 3/3/2/2, 5 -> 1/1/1/1)."""
+        """TP1-TP4 lots: all four set = that split; TP3 and TP4 both 0 = automatic 30 / 30 / 20 / 20 % rounded down
+        (10 -> 3/3/2/2, 5 -> 1/1/1/1) whatever the two-target TP1 / TP2 lots are."""
         own = (self.tp1_lots, self.tp2_lots, self.tp3_lots, self.tp4_lots)
         if all(own):
             return own  # type: ignore[return-value]

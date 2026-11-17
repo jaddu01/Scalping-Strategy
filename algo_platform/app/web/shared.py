@@ -10,8 +10,11 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-# what each partner sets for themselves; everything else is the shared rules
-PERSONAL_PARAMS = ("lots", "tp1_lots", "tp2_lots", "tp3_lots", "tp4_lots")
+# what each partner sets for themselves on their own run; everything else is the shared rules (entries, stops,
+# schedule). The take-profit choices are personal too: TP on/off, 2 or 4 targets, the % levels and the lots.
+PERSONAL_PARAMS = ("lots", "tp1_lots", "tp2_lots", "tp3_lots", "tp4_lots",
+                   "tp_enabled", "tp_mode", "tp_basis", "tp1_value", "tp2_value",
+                   "tp_band1_max", "tp_band2_max", "tp_pcts_low", "tp_pcts_mid", "tp_pcts_high")
 
 
 def lots_of(params: dict[str, Any] | None) -> Any:

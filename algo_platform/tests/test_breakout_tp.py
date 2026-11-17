@@ -10,7 +10,7 @@ from sqlalchemy import select
 from backtest.engine import BacktestConfig, run_backtest
 from brokers.base import Candle, Exchange, Tick
 from core.clock import combine
-from storage.models import Trade
+from storage.models import OrderRecord as OrderRecordM, Trade
 from strategies.base import Direction
 from strategies.breakout_tp import (NiftyEarlyBreakoutTP, NiftyEarlyBreakoutTPSettings, NiftyRefBreakoutTP,
                                     NiftyRefBreakoutTPSettings, tp_levels)
@@ -324,6 +324,8 @@ def test_four_tp_settings_checks_and_levels():
 
     s = NiftyTwoEntryTPSettings(lots=10, tp_mode="four_by_premium")
     assert s.split4() == (3, 3, 2, 2)
+    # a run that still has its two-target lots (4 / 4) switches to 4 TPs with the automatic split
+    assert NiftyTwoEntryTPSettings(lots=10, tp_mode="four_by_premium", tp1_lots=4, tp2_lots=4).split4() == (3, 3, 2, 2)
     assert NiftyTwoEntryTPSettings(lots=10, tp_mode="four_by_premium", tp1_lots=2, tp2_lots=2, tp3_lots=2,
                                    tp4_lots=2).split4() == (2, 2, 2, 2)
     pts = tp_levels(s, Direction.CE_BUY, 23660, make_candle(at("09:45"), 1, 2, 0, 1))
@@ -336,7 +338,8 @@ def test_four_tp_settings_checks_and_levels():
     for kw, msg in (({"tp_pcts_low": [20, 30, 40]}, "needs 4 percentages"),
                     ({"tp_pcts_mid": [15, 22, 22, 40]}, "must be above 0 and rise"),
                     ({"tp_band2_max": 60}, "middle band"),
-                    ({"tp1_lots": 3, "tp2_lots": 3}, "TP1-TP4 lots to 0"),
+                    ({"tp3_lots": 2, "tp4_lots": 2}, "set each of TP1-TP4 lots"),
+                    ({"tp1_lots": 4, "tp2_lots": 4, "tp3_lots": 2}, "set each of TP1-TP4 lots"),
                     ({"tp1_lots": 4, "tp2_lots": 4, "tp3_lots": 2, "tp4_lots": 2}, "more than Lots"),
                     ({"tp_basis": "points"}, "premium_pct")):
         with pytest.raises(ValidationError, match=msg):
@@ -387,3 +390,61 @@ async def test_four_tps_spot_sl_after_tp2_closes_the_rest(tmp_path):
         assert t.gross_pnl == pytest.approx(22 * 195 + 22 * 195 - 20 * 260)
     finally:
         await env.platform.stop()
+
+
+async def test_tp_partial_waits_while_a_manual_stop_holds_the_position(tmp_path):
+    """Live: a manual SELL order at the broker holds the lots; a TP sell on top would be a short sale (rejected
+    for funds). No order, one alert, and the TP sells once the manual order is cancelled."""
+    from brokers.base import OrderRequest, OrderType, Side
+
+    env = await build_env(tmp_path, mode="live", instances=[{"name": "TP", "template": "nifty_ref_breakout_tp"}])
+    try:
+        tm = env.platform.trades
+        tm.partial_rearm_sec = 0.05
+        lt = await _enter(env)
+        sync = env.platform.accounts[env.account_id].live_sync
+        inst = env.mock.find_instrument(Exchange.NFO, lt.token)
+        manual = await env.mock.place_order(OrderRequest(instrument=inst, side=Side.SELL, quantity=lt.open_qty,
+                                                         order_type=OrderType.SL_M, trigger_price=80.0))
+        await sync.poll_once(full=True)
+        await env.settle()
+        env.option_price(23650, "CE", 120.0)  # TP1 reached
+        await env.settle(10)
+        assert lt.open_qty == 325 and not lt.partials[0]["filled"]
+        msgs = env.messages("EXIT_BLOCKED_BY_MANUAL_ORDER")
+        assert len(msgs) == 1 and msgs[0].startswith("tp1:") and manual in msgs[0]
+        with env.db.session() as s:
+            assert not list(s.scalars(select(OrderRecordM).where(OrderRecordM.purpose == "EXIT")))
+        await env.mock.cancel_order(manual)  # the manual stop is cancelled; the target is re-armed
+        await sync.poll_once(full=True)
+        env.option_price(23650, "CE", 121.0)
+        await env.wait_for(lambda: lt.open_qty == 195 and not lt.partial_busy)
+        assert lt.partials[0]["filled"] == 130 and len(env.messages("EXIT_BLOCKED_BY_MANUAL_ORDER")) == 1
+    finally:
+        await env.platform.stop()
+
+
+def test_tp_choices_are_each_runs_own_setting():
+    """Lots and the whole TP setup (on/off, 2 or 4 targets, % levels, lots per target) are set on each run;
+    the shared rules (entries, stops, schedule) cannot overwrite them."""
+    from app.web.forms import build_fields
+    from app.web.shared import check_runs, merged, split_fields
+    from strategies.nifty_two_entry import NiftyTwoEntryTPSettings as M
+
+    rules = M(lots=10).model_dump(mode="json")  # rules: two targets
+    own_4 = {"lots": 5, "tp_mode": "four_by_premium", "tp_pcts_high": [15, 22, 30, 40]}
+    own_2 = {"lots": 10, "tp1_lots": 4, "tp2_lots": 4}
+    a = M.model_validate(merged(M, rules, own_4))
+    b = M.model_validate(merged(M, rules, own_2))
+    assert (a.tp_mode, a.lots, a.split4(), a.tp_pcts_high) == ("four_by_premium", 5, (1, 1, 1, 1), [15, 22, 30, 40])
+    assert (b.tp_mode, b.split()) == ("two_targets", (4, 4))
+    # new rules (another buffer) keep each run's own TP choice
+    ok, problems = check_runs(M, {**rules, "buffer_points": 3.0, "tp_mode": "two_targets"},
+                              [("A", own_4), ("B", own_2)])
+    assert not problems and ok["A"]["tp_mode"] == "four_by_premium" and ok["A"]["buffer_points"] == 3.0
+    # the run form shows the TP fields, the rules form does not
+    fields = build_fields(M, rules, {}, "params.")
+    run_names = {f.name.split(".", 1)[-1] for f in split_fields(fields, personal=True)}
+    rule_names = {f.name.split(".", 1)[-1] for f in split_fields(fields, personal=False)}
+    assert {"lots", "tp_mode", "tp_pcts_low", "tp1_lots", "tp4_lots", "tp_enabled"} <= run_names
+    assert not {"tp_mode", "tp_pcts_low", "lots"} & rule_names and "buffer_points" in rule_names

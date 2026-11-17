@@ -127,7 +127,7 @@ async def save_rules(sid: int, request: Request, user: SessionInfo = Depends(req
     new_params: dict[str, dict[str, Any]] = {}
     if rules is not None:
         new_params, problems = check_runs(model, rules, [(r.name, r.params or {}) for r in runs])
-        general += [f"does not fit the run {pr} — change that run's lots first" for pr in problems]
+        general += [f"does not fit the run {pr} — change that run's own settings (lots / TP) first" for pr in problems]
     if errors or general:
         return render(request, "strategy_form.html", _form_ctx(request, user, sh.template_id, values, errors, general,
                                                                kind="rules", shared=sh), 400)
