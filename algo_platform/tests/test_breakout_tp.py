@@ -305,3 +305,85 @@ async def test_slots_route_shows_trade_points_and_tp_legs(tmp_path):
             assert "09:59:58" in html
     finally:
         await env.platform.stop()
+
+
+# ---------------------------------------------------------------- 4 TPs by entry premium
+def test_band_pct_edges():
+    from engine.trades import band_pct
+
+    s = NiftyRefBreakoutTPSettings(tp_mode="four_by_premium")
+    bands = [s.bands(i) for i in range(4)]
+    assert [band_pct(bands[0], p) for p in (10, 79.95, 80, 150, 150.05, 900)] == [20, 20, 15, 15, 8, 8]
+    assert [band_pct(b, 64.8) for b in bands] == [20, 30, 40, 50]
+    assert [band_pct(b, 120) for b in bands] == [15, 22, 30, 40]
+    assert [band_pct(b, 200) for b in bands] == [8, 12, 20, 25]
+
+
+def test_four_tp_settings_checks_and_levels():
+    from strategies.nifty_two_entry import NiftyTwoEntryTPSettings
+
+    s = NiftyTwoEntryTPSettings(lots=10, tp_mode="four_by_premium")
+    assert s.split4() == (3, 3, 2, 2)
+    assert NiftyTwoEntryTPSettings(lots=10, tp_mode="four_by_premium", tp1_lots=2, tp2_lots=2, tp3_lots=2,
+                                   tp4_lots=2).split4() == (2, 2, 2, 2)
+    pts = tp_levels(s, Direction.CE_BUY, 23660, make_candle(at("09:45"), 1, 2, 0, 1))
+    assert [(p.label, p.lots, p.premium_pct, p.premium_bands[0]) for p in pts] == [
+        ("tp1", 3, None, (80.0, 20.0)), ("tp2", 3, None, (80.0, 30.0)), ("tp3", 2, None, (80.0, 40.0)),
+        ("tp4", 2, None, (80.0, 50.0))]
+    # two-target mode is unchanged
+    assert [p.label for p in tp_levels(NiftyTwoEntryTPSettings(lots=10), Direction.CE_BUY, 23660,
+                                       make_candle(at("09:45"), 1, 2, 0, 1))] == ["tp1", "tp2"]
+    for kw, msg in (({"tp_pcts_low": [20, 30, 40]}, "needs 4 percentages"),
+                    ({"tp_pcts_mid": [15, 22, 22, 40]}, "must be above 0 and rise"),
+                    ({"tp_band2_max": 60}, "middle band"),
+                    ({"tp1_lots": 3, "tp2_lots": 3}, "TP1-TP4 lots to 0"),
+                    ({"tp1_lots": 4, "tp2_lots": 4, "tp3_lots": 2, "tp4_lots": 2}, "more than Lots"),
+                    ({"tp_basis": "points"}, "premium_pct")):
+        with pytest.raises(ValidationError, match=msg):
+            NiftyTwoEntryTPSettings(lots=10, tp_mode="four_by_premium", **kw)
+
+
+async def test_four_tps_by_premium_band_sell_the_whole_position(tmp_path):
+    """Entry fill 100 is in the 80-150 band: 15 / 22 / 30 / 40 % -> 115 / 122 / 130 / 140; 3/3/2/2 of 10 lots;
+    TP4 sells the last lots and closes the trade (exit reason tp4); the broker stop shrinks and is cancelled."""
+    env = await build_env(tmp_path, instances=[{"name": "TP4", "template": "nifty_ref_breakout_tp", "params": {
+        "protective_sl_pct": 40, "lots": 10, "tp_mode": "four_by_premium"}}])
+    try:
+        lt = await _enter(env)
+        assert lt.entry_qty == 650
+        assert [(p["label"], p["pct"], p["level"], p["qty"]) for p in lt.partials] == [
+            ("tp1", 15.0, 115.0, 195), ("tp2", 22.0, 122.0, 195), ("tp3", 30.0, 130.0, 130), ("tp4", 40.0, 140.0, 130)]
+        for price, left in ((115.0, 455), (122.0, 260), (130.0, 130)):
+            env.option_price(23650, "CE", price)
+            await env.wait_for(lambda left=left: lt.open_qty == left and not lt.partial_busy)
+            assert _sl_qty(env, lt) == left
+        env.option_price(23650, "CE", 140.0)
+        await env.wait_for(lambda: not env.platform.trades.live)
+        with env.db.session() as s:
+            t = s.get(Trade, lt.id)
+        assert t.status == "CLOSED" and t.exit_reason == "tp4" and t.open_quantity == 0
+        assert t.gross_pnl == pytest.approx(15 * 195 + 22 * 195 + 30 * 130 + 40 * 130)
+        assert [(p["label"], p["filled"], p["price"]) for p in t.meta["partials"]] == [
+            ("tp1", 195, 115.0), ("tp2", 195, 122.0), ("tp3", 130, 130.0), ("tp4", 130, 140.0)]
+        assert not env.types("EXIT_FAILED") and not env.types("PARTIAL_EXIT_FAILED")
+    finally:
+        await env.platform.stop()
+
+
+async def test_four_tps_spot_sl_after_tp2_closes_the_rest(tmp_path):
+    env = await build_env(tmp_path, instances=[{"name": "TP4", "template": "nifty_ref_breakout_tp", "params": {
+        "lots": 10, "tp_mode": "four_by_premium"}}])
+    try:
+        lt = await _enter(env)
+        env.option_price(23650, "CE", 122.0)  # TP1 and TP2 levels are both passed
+        await env.wait_for(lambda: lt.open_qty == 260 and not lt.partial_busy)
+        env.option_price(23650, "CE", 80.0)
+        env.spot(23609.0)  # spot SL takes out the 4 lots left for TP3 / TP4
+        await env.wait_for(lambda: not env.platform.trades.live)
+        with env.db.session() as s:
+            t = s.get(Trade, lt.id)
+        assert t.exit_reason == "spot_stop_loss"
+        assert [p["filled"] for p in t.meta["partials"]] == [195, 195, 0, 0]
+        assert t.gross_pnl == pytest.approx(22 * 195 + 22 * 195 - 20 * 260)
+    finally:
+        await env.platform.stop()

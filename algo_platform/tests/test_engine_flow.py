@@ -458,3 +458,89 @@ async def test_booked_tp_profit_counts_in_pnl_check_limits_and_totals(tmp_path):
         tm.live.pop(900)
     finally:
         await p.stop()
+
+
+async def _live_trade(tmp_path):
+    env = await build_env(tmp_path, mode="live")
+    env.ref_candle("09:45", 23639.20, 23609.20)
+    env.spot(23630.0)
+    env.option_price(23650, "CE", 100.0)
+    await env.at("09:50", 6)
+    await env.at("09:52", 31)
+    env.spot(23660.0)
+    await env.wait_for(lambda: env.platform.trades.live)
+    lt = next(iter(env.platform.trades.live.values()))
+    sync = env.platform.accounts[env.account_id].live_sync
+    await env.wait_for(lambda: lt.protective_sl_status == "TRIGGER_PENDING")
+    return env, lt, sync
+
+
+def _spy_exits(tm):
+    sent = []
+    real = tm.orders.place
+
+    async def spy(adapter, s, req, **kw):
+        if kw.get("purpose") == "EXIT":
+            sent.append(req.quantity)
+        return await real(adapter, s, req, **kw)
+
+    tm.orders.place = spy
+    return sent
+
+
+async def test_manual_stop_at_broker_blocks_our_exit_without_order_spam(tmp_path):
+    """Real case (17-Nov, Ram): a manual SL SELL placed in the broker's app held the whole position; every exit sell
+    of ours was a short sale to Angel (rejected for funds) -> 111 rejected orders. Now: no order, one clear alert,
+    and the exit goes through once the manual order is cancelled."""
+    from brokers.base import Exchange, OrderRequest
+
+    env, lt, sync = await _live_trade(tmp_path)
+    try:
+        tm = env.platform.trades
+        inst = env.mock.find_instrument(Exchange.NFO, lt.token)
+        manual = await env.mock.place_order(OrderRequest(instrument=inst, side=Side.SELL, quantity=lt.open_qty,
+                                                         order_type=OrderType.SL_M, trigger_price=80.0))
+        await sync.poll_once(full=True)
+        await env.settle()
+        sent = _spy_exits(tm)
+        assert await tm.exit_trade(lt.id, "timed_exit") is False
+        assert await tm.exit_trade(lt.id, "timed_exit") is False  # the re-check: still blocked, still quiet
+        assert sent == [] and lt.id in tm.live and lt.status == "OPEN"
+        msgs = env.messages("EXIT_BLOCKED_BY_MANUAL_ORDER")
+        assert len(msgs) == 1 and manual in msgs[0] and "trigger 80" in msgs[0]
+        await env.mock.cancel_order(manual)  # the user cancels the manual stop
+        await sync.poll_once(full=True)
+        await env.settle()
+        assert await tm.exit_trade(lt.id, "timed_exit") is True
+        assert sent == [325] and not tm.live
+        with env.db.session() as s:
+            assert s.get(Trade, lt.id).exit_reason == "timed_exit"
+    finally:
+        await env.platform.stop()
+
+
+async def test_funds_rejected_exit_backs_off_instead_of_three_orders_every_5s(tmp_path):
+    env, lt, sync = await _live_trade(tmp_path)
+    try:
+        tm = env.platform.trades
+        real_place = env.mock.place_order
+
+        async def refuse_sells(req):
+            if req.side is Side.SELL and req.order_type is OrderType.MARKET:
+                o = env.mock._new_order(req, OrderStatus.REJECTED, "Your order has been rejected due to Insufficient "
+                                                                  "Funds. Available funds - Rs. 203501.55.")
+                env.mock._publish(o)
+                return o.order_id
+            return await real_place(req)
+
+        env.mock.place_order = refuse_sells
+        sent = _spy_exits(tm)
+        assert await tm.exit_trade(lt.id, "timed_exit") is False
+        assert sent == [325]  # one order, not three in a row
+        assert "retrying in 5s" in env.messages("EXIT_FAILED")[-1] and "Insufficient Funds" in env.messages("EXIT_FAILED")[-1]
+        assert await tm.exit_trade(lt.id, "timed_exit") is False
+        assert sent == [325, 325] and "retrying in 10s" in env.messages("EXIT_FAILED")[-1]
+        env.mock.place_order = real_place
+        assert await tm.exit_trade(lt.id, "timed_exit") is True and not tm.live
+    finally:
+        await env.platform.stop()

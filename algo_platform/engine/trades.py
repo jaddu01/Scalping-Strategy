@@ -73,6 +73,8 @@ class LiveTrade:
     exit_order_ids: list[str] = field(default_factory=list)
     cancelling_sl: bool = False
     missing_obs: int = 0
+    exit_rejects: int = 0  # exit sells refused by the broker for funds / margin in a row (retries slow down)
+    blocked_by: str | None = None  # manual order(s) holding the quantity, already reported
     product: ProductType = ProductType.INTRADAY
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # scale-out targets (TP1, TP2): dicts {label, level, side, qty, done, filled, price}
@@ -476,11 +478,24 @@ class TradeManager:
             qty = lt.open_qty
             pos = sync.position_for(lt.token)
             fresh = sync.positions_at is not None and (self.clock.now() - sync.positions_at).total_seconds() < 15
+            others = sum(t.open_qty for t in self.live.values() if t is not lt and t.status == "OPEN"
+                         and t.token == lt.token and t.account_id == lt.account_id and t.mode == lt.mode)
             if pos is not None and fresh and not lt.mode == "paper":
                 # several runs can hold the same strike: the others' open quantity is not ours to sell
-                others = sum(t.open_qty for t in self.live.values() if t is not lt and t.status == "OPEN"
-                             and t.token == lt.token and t.account_id == lt.account_id and t.mode == lt.mode)
                 qty = max(0, min(qty, pos.net_quantity - others))
+            # 3. a manual SELL order still working at the broker on this strike (e.g. a stop placed in the broker's
+            # app) reserves that quantity: a sell of ours on top of it is a SHORT sale to the broker (rejected
+            # for funds: 17-Nov-2026, 111 rejected orders in 4 minutes). Do not send orders; say which
+            # order is in the way; the manual order's fill is then settled as a manual exit.
+            manual = self._manual_sells(sync, lt.token)
+            if manual and not lt.mode == "paper":
+                held = pos.net_quantity if pos is not None else lt.open_qty + others
+                reserved = sum(max(0, o.quantity - o.filled_quantity) for o in manual)
+                free = max(0, held - reserved - others)
+                if free < qty:
+                    qty = free
+                if qty <= 0:
+                    return self._exit_blocked(lt, manual, reason, spot, premium)
             if qty <= 0:
                 await self._finalize(lt, "manual_exit_at_broker", sync)
                 return True
@@ -489,6 +504,7 @@ class TradeManager:
             if age is None or age > 5:
                 await self.market.fetch_ltp(lt.option_key)  # paper fills and the log need a current premium
             remaining = qty
+            refused: str | None = None
             for attempt in range(1, 4):
                 req = OrderRequest(instrument=inst, side=Side.SELL, quantity=remaining, order_type=OrderType.MARKET,
                                    product=lt.product, tag=make_tag(lt.instance_id or 0, lt.id,
@@ -507,22 +523,60 @@ class TradeManager:
                 lt.open_qty = max(0, lt.open_qty - filled)
                 if remaining <= 0:
                     break
+                if final is not None and final.status is OrderStatus.REJECTED and _funds_rejection(final):
+                    refused = final.status_message
+                    break  # the broker sees a short sale: more orders now only pile up rejections
                 if final is not None and not final.status.is_terminal:
                     await self.orders.cancel(adapter, sync, placed.order_id, trade_ref=lt.ref, reason="exit retry")
             if remaining > 0:
                 lt.status = "OPEN"
                 self._save(lt, status="OPEN", open_quantity=lt.open_qty)
+                # refused for funds / margin: back off 5 s, 10 s, 20 s ... up to 60 s instead of 3 orders every 5 s
+                lt.exit_rejects = lt.exit_rejects + 1 if refused else 0
+                delay = min(60, 5 * 2 ** (lt.exit_rejects - 1)) if refused else 5
+                why = (f" — the broker refused the sell for funds/margin, i.e. it sees no sellable quantity "
+                       f"(a manual sell order or a square-off at the broker?): {refused}") if refused else ""
                 self._emit(Category.ERROR, "EXIT_FAILED",
-                           f"could not exit {remaining} units of {lt.symbol}; retrying in 5s — CHECK THE BROKER",
-                           Level.CRITICAL, lt=lt, remaining=remaining, reason=reason)
+                           f"could not exit {remaining} units of {lt.symbol}; retrying in {delay}s — CHECK THE BROKER"
+                           f"{why}", Level.CRITICAL, lt=lt, remaining=remaining, reason=reason, retry_sec=delay,
+                           broker_reason=refused)
                 st = self.exits.states.get(lt.id)
                 loop = asyncio.get_running_loop()
-                loop.call_later(5, lambda: loop.create_task(self.exit_trade(lt.id, reason, spot=spot, premium=premium)))
+                loop.call_later(delay, lambda: loop.create_task(
+                    self.exit_trade(lt.id, reason, spot=spot, premium=premium)))
                 if st is not None:
                     st.quantity = lt.open_qty
                 return False
             await self._finalize(lt, reason, sync)
             return True
+
+    @staticmethod
+    def _manual_sells(sync: BrokerSync, token: str) -> list[Order]:
+        """SELL orders on this strike still working at the broker that the platform did not place."""
+        return [o for o in list(sync.orders.values()) if o.token == token and o.side is Side.SELL
+                and o.status.is_working and parse_tag(o.tag) is None]
+
+    def _exit_blocked(self, lt: LiveTrade, manual: list[Order], reason: str, spot: float | None,
+                      premium: float | None) -> bool:
+        """Our exit cannot be sold while manual sell orders hold the quantity: no orders, a clear alert (once per
+        set of blocking orders), and a quiet re-check every 10 s. When the manual order fills, the trade is settled
+        as a manual exit; when it is cancelled, the next re-check sells as usual."""
+        lt.status = "OPEN"
+        self._save(lt, status="OPEN")
+        ids = ",".join(sorted(o.order_id for o in manual))
+        if lt.blocked_by != ids:
+            lt.blocked_by = ids
+            desc = "; ".join(f"{o.order_id} SELL {o.quantity - o.filled_quantity} {o.order_type.value}"
+                             + (f" trigger {o.trigger_price:g}" if o.trigger_price else "")
+                             + (f" price {o.price:g}" if o.price else "") for o in manual)
+            self._emit(Category.RISK, "EXIT_BLOCKED_BY_MANUAL_ORDER",
+                       f"{reason}: cannot sell {lt.open_qty} {lt.symbol} — manual order(s) at the broker hold the "
+                       f"position ({desc}). The platform sends no sell (it would be a short sale); cancel the manual "
+                       f"order to let it exit, or the manual order's fill closes this trade", Level.CRITICAL, lt=lt,
+                       reason=reason, orders=[o.order_id for o in manual])
+        loop = asyncio.get_running_loop()
+        loop.call_later(10, lambda: loop.create_task(self.exit_trade(lt.id, reason, spot=spot, premium=premium)))
+        return False
 
     async def exit_partial(self, trade_db_id: int, idx: int, *, spot: float | None = None,
                            premium: float | None = None) -> bool:
@@ -1146,8 +1200,33 @@ class TradeManager:
         return out
 
 
+_FUNDS_WORDS = ("insufficient fund", "margin", "rms:", "rms ", "short sell", "not enough")
+
+
+def _funds_rejection(o: Order) -> bool:
+    """A rejection meaning the broker would treat this sell as a new (short) position."""
+    msg = (o.status_message or "").lower()
+    return any(w in msg for w in _FUNDS_WORDS)
+
+
+def band_pct(bands: Any, entry_price: float) -> float:
+    """The % of the premium band the entry fill falls in: below the first bound, up to and including the second,
+    ... (e.g. ((80, 20), (150, 15), (inf, 8)): 79.95 -> 20, 80 -> 15, 150 -> 15, 150.05 -> 8)."""
+    first = True
+    for bound, pct in bands:
+        if (entry_price < bound) if first else (entry_price <= bound):
+            return float(pct)
+        first = False
+    return float(bands[-1][1])
+
+
 def _partial_plan(p: Any, lot_size: int, entry_price: float | None = None, tick_size: float = 0.05) -> dict[str, Any]:
     """A scale-out target as stored on the trade. Premium targets get their level from the entry fill."""
+    if getattr(p, "premium_bands", None):
+        pct = band_pct(p.premium_bands, entry_price) if entry_price else None
+        level = round_to_tick(entry_price * (1 + pct / 100), tick_size, "up") if pct is not None else None
+        return {"label": p.label, "basis": "premium", "pct": pct, "level": level, "side": "above",
+                "qty": p.lots * lot_size, "done": False, "filled": 0, "price": None, "spot": None}
     if p.premium_pct is not None:
         level = (round_to_tick(entry_price * (1 + p.premium_pct / 100), tick_size, "up")
                  if entry_price else None)

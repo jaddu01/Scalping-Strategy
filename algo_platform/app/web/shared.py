@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 # what each partner sets for themselves; everything else is the shared rules
-PERSONAL_PARAMS = ("lots", "tp1_lots", "tp2_lots", "tp3_lots")
+PERSONAL_PARAMS = ("lots", "tp1_lots", "tp2_lots", "tp3_lots", "tp4_lots")
 
 
 def lots_of(params: dict[str, Any] | None) -> Any:

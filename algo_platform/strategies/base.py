@@ -52,6 +52,9 @@ class PartialTarget:
     # premium target instead of a spot level: hit when the option's price >= entry fill × (1 + pct/100).
     # The level is set by the engine once the entry fill price is known.
     premium_pct: float | None = None
+    # premium % chosen by the entry fill price: ((upper bound, pct), ...) ascending; the first band whose bound is
+    # above the fill applies (bounds: "< 80" -> 80, "80-150" -> 150 inclusive, "above" -> inf). Engine resolves it.
+    premium_bands: tuple[tuple[float, float], ...] | None = None
 
 
 @dataclass
