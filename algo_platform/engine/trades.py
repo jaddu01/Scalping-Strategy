@@ -19,7 +19,8 @@ from core.events import Category, EventBus, Level
 from core.settings_schema import GlobalSettings
 from engine.accounts import AccountRuntime, BrokerSync, make_tag, parse_tag
 from engine.charges import option_charges
-from engine.exit_manager import ExitManager, ExitState
+from engine.exit_manager import (ExitManager, ExitState, RunnerState, band_pct, runner_from_plan,
+                                 runner_on_fill)
 from engine.market_data import MarketDataService, series_of
 from engine.order_manager import OrderManager
 from engine.risk_manager import RiskManager
@@ -81,6 +82,7 @@ class LiveTrade:
     partials: list[dict[str, Any]] = field(default_factory=list)
     partial_busy: bool = False  # a partial exit order is in flight (position check must wait)
     sl_reason: str = "spot_stop_loss"  # "trailing_stop" once the strategy has moved the stop
+    runner: RunnerState | None = None  # runner protection floor (TP strategies); shared with the ExitState
 
     @property
     def option_series(self) -> str:
@@ -266,6 +268,7 @@ class TradeManager:
                         meta={**signal.meta, "protective_sl_pct": plan.protective_sl_pct,
                               "plan_exit_at": plan.exit_at.isoformat(), "tick_size": inst.tick_size,
                               "partials": [_partial_plan(p, inst.lot_size) for p in plan.partial_targets],
+                              **({"runner_plan": plan.runner} if plan.runner else {}),
                               "spot_key": plan.underlying and {"underlying": plan.underlying.underlying,
                                                                "exchange": plan.underlying.exchange.value,
                                                                "instrument_type": plan.underlying.instrument_type.value}})
@@ -317,10 +320,13 @@ class TradeManager:
             tp_spot_level=plan.tp_spot_level, tp_spot_side=plan.tp_spot_side,
             tp_premium_level=round(entry_price * (1 + plan.tp_premium_pct / 100), 2) if plan.tp_premium_pct else None,
             protective_pct=plan.protective_sl_pct,
-            partials=[_partial_plan(p, inst.lot_size, entry_price, inst.tick_size) for p in plan.partial_targets])
+            partials=[_partial_plan(p, inst.lot_size, entry_price, inst.tick_size) for p in plan.partial_targets],
+            runner=runner_from_plan(plan.runner, entry_price, inst.tick_size))
         self.live[trade_id] = lt
         if lt.partials:
             self._save_meta(lt, partials=lt.partials)  # premium targets now have their level
+        if lt.runner is not None:
+            self._save_meta(lt, runner=lt.runner.as_dict())  # the trail % of the entry fill's band, fixed now
         self._save(lt, status="OPEN", quantity=filled, open_quantity=filled, entry_price=entry_price,
                    entry_time=lt.entry_time, entry_order_id=placed.order_id, tp_premium_level=lt.tp_premium_level)
         await self._place_protective(lt, adapter, sync)
@@ -397,7 +403,8 @@ class TradeManager:
             exit_at=lt.exit_at, square_off_at=sq, spot_sl=lt.spot_sl, spot_sl_side=lt.spot_sl_side,
             tp_spot_level=lt.tp_spot_level, tp_spot_side=lt.tp_spot_side, tp_premium_level=lt.tp_premium_level,
             last_spot=self.market.ltp(lt.spot_key) if lt.spot_key else None,
-            last_premium=self.market.ltp(lt.option_series), partials=lt.partials, sl_reason=lt.sl_reason))
+            last_premium=self.market.ltp(lt.option_series), partials=lt.partials, sl_reason=lt.sl_reason,
+            runner=lt.runner))
 
 
     async def _place_protective(self, lt: LiveTrade, adapter: Any, sync: BrokerSync, qty: int | None = None) -> None:
@@ -417,8 +424,8 @@ class TradeManager:
                                tag=make_tag(lt.instance_id or 0, lt.id, "PROTECTIVE_SL"))
             placed = await self.orders.place(adapter, sync, req, purpose="PROTECTIVE_SL", trade_db_id=lt.id,
                                              trade_ref=lt.ref, instance_id=lt.instance_id,
-                                             instance_name=lt.instance_name, signal_price=trigger, lots=lt.lots,
-                                             attempts=2)
+                                             instance_name=lt.instance_name, signal_price=trigger,
+                                             lots=qty // max(1, lt.lot_size), attempts=2)
             if placed.order_id is None:
                 continue
             o = await self.orders.wait_working_or_terminal(sync, placed.order_id, 5.0)
@@ -453,7 +460,8 @@ class TradeManager:
             lt.status = "EXITING"
             self._save(lt, status="EXITING", exit_trigger_spot=spot, exit_trigger_premium=premium)
             self._emit(Category.EXIT, "TRIGGERED",
-                       f"reason={reason} spot={_f(spot)} premium={_f(premium)}" + (f" by={by}" if by else ""),
+                       f"reason={reason} spot={_f(spot)} premium={_f(premium)}" + (f" by={by}" if by else "")
+                       + _runner_txt(lt, reason),
                        Level.INFO, lt=lt, reason=reason, spot=spot, premium=premium, by=by)
             try:
                 acc, adapter, sync = self._route(lt)
@@ -512,7 +520,8 @@ class TradeManager:
                                                                     "KILL" if reason == "kill_switch" else "EXIT"))
                 placed = await self.orders.place(adapter, sync, req, purpose="EXIT", trade_db_id=lt.id,
                                                  trade_ref=lt.ref, instance_id=lt.instance_id,
-                                                 instance_name=lt.instance_name, signal_price=premium, lots=lt.lots)
+                                                 instance_name=lt.instance_name, signal_price=premium,
+                                                 lots=remaining // max(1, lt.lot_size))
                 if placed.order_id is None:
                     await asyncio.sleep(0.5 * attempt)
                     continue
@@ -688,12 +697,49 @@ class TradeManager:
                            f"{p['label'].upper()} sold qty={filled} price={_f(price)} pnl={_f(pnl)} "
                            f"remaining={lt.open_qty}", lt=lt, reason=p["label"], quantity=filled, price=price,
                            pnl=pnl, remaining=lt.open_qty)
+                if lt.open_qty > 0:
+                    self._runner_after_fill(lt)
                 if lt.open_qty <= 0:
                     lt.status = "EXITING"
                     await self._finalize(lt, p["label"], sync)
                 return True
             finally:
                 lt.partial_busy = False
+
+    def _runner_after_fill(self, lt: LiveTrade) -> None:
+        """A TP sell is booked: arm the runner floor (start TP filled) or lift its step (a later TP filled)."""
+        r = lt.runner
+        if r is None:
+            return
+        event = runner_on_fill(r, lt.partials, lt.entry_price, self.clock.now())
+        self._save_meta(lt, runner=r.as_dict())  # also keeps TP1's fill time for the timeout
+        if event is None:
+            return
+        last = next((p["label"] for p in reversed(lt.partials) if p.get("filled")), "-")
+        if event == "armed":
+            self._emit(Category.EXIT, "RUNNER_FLOOR_ARMED",
+                       f"start={r.start} step_floor={_f(r.step_floor)} trail={r.trail_pct:g}% peak={_f(r.peak)} "
+                       f"floor={_f(r.floor)} qty={lt.open_qty}" + _runner_extra(r), lt=lt, start=r.start,
+                       step_floor=r.step_floor, trail_pct=r.trail_pct, peak=r.peak, floor=r.floor,
+                       exit_level=r.exit_level, timeout_at=r.timeout_at, quantity=lt.open_qty)
+        else:
+            self._emit(Category.EXIT, "RUNNER_FLOOR_RAISED",
+                       f"after={last} step_floor={_f(r.step_floor)} peak={_f(r.peak)} floor={_f(r.floor)}", lt=lt,
+                       step_floor=r.step_floor, peak=r.peak, floor=r.floor, after=last)
+        st = self.exits.states.get(lt.id)
+        if st is not None:  # the premium may already be at or below the new floor
+            self.exits._check(st, self.clock.now())
+
+    def runner_moved(self, st: ExitState, log_it: bool) -> None:
+        """The trailing floor rose on an option tick: persist it (a restart keeps it); log it when up >= 0.5 %."""
+        lt = self.live.get(st.trade_db_id)
+        if lt is None or lt.runner is None:
+            return
+        r = lt.runner
+        self._save_meta(lt, runner=r.as_dict())
+        if log_it:
+            self._emit(Category.EXIT, "RUNNER_FLOOR_RAISED", f"peak={_f(r.peak)} floor={_f(r.floor)}", Level.INFO,
+                       lt=lt, peak=r.peak, floor=r.floor)
 
     def tighten_stop(self, trade_ref: str, level: float, *, instance_id: int | None = None) -> bool:
         """Move a trade's spot stop-loss closer to the price (trailing stop). It can only tighten: a level
@@ -806,7 +852,8 @@ class TradeManager:
         parts = [p for p in lt.partials if p.get("filled")]
         part_txt = (" partials=" + ",".join(f"{p['label']}:{p['filled']}@{_f(p['price'])}" for p in parts)) if parts else ""
         self._emit(Category.STRATEGY, "EXIT",
-                   f"EXIT reason={reason} premium_in={entry:.2f} premium_out={_f(out)} pnl={_f(gross)}{part_txt}", lt=lt,
+                   f"EXIT reason={reason} premium_in={entry:.2f} premium_out={_f(out)} pnl={_f(gross)}{part_txt}"
+                   f"{_runner_txt(lt, reason)}", lt=lt,
                    reason=reason, premium_in=entry, premium_out=out, pnl=gross,
                    partials=[{k: p[k] for k in ("label", "filled", "price")} for p in parts])
         self._emit(Category.POSITION, "CLOSED",
@@ -1134,7 +1181,10 @@ class TradeManager:
             protective_sl_order_id=row.protective_sl_order_id, protective_sl_trigger=row.protective_sl_trigger,
             protective_sl_status=row.protective_sl_status, status="OPEN", exit_order_ids=exit_ids,
             partials=[dict(p) for p in meta.get("partials") or []],
-            sl_reason="trailing_stop" if meta.get("trailed") else "spot_stop_loss")
+            sl_reason="trailing_stop" if meta.get("trailed") else "spot_stop_loss",
+            runner=(RunnerState.from_dict(meta.get("runner"))
+                    or runner_from_plan(meta.get("runner_plan"), row.entry_price or 0.0,
+                                        float(meta.get("tick_size", 0.05)))))
 
     def today_trade_infos(self, instance_id: int) -> list[TradeInfo]:
         today = self.clock.now().date()
@@ -1233,6 +1283,7 @@ class TradeManager:
                 "tp_level": lt.tp_spot_level if lt.tp_spot_level is not None else lt.tp_premium_level,
                 "tp_kind": "spot" if lt.tp_spot_level is not None else ("premium" if lt.tp_premium_level else None),
                 "tp_distance": tp_dist, "exit_at": lt.exit_at.isoformat(),
+                "runner": lt.runner.text() if lt.runner is not None else None,
                 "seconds_to_exit": max(0, int((lt.exit_at - now).total_seconds())), "status": lt.status,
                 "broker_pnl": broker_pnl, "pnl_diff": diff,
                 "mismatch": lt.token in self.recon_bad.get((lt.account_id, lt.mode == "paper"), set()),
@@ -1249,17 +1300,6 @@ def _funds_rejection(o: Order) -> bool:
     return any(w in msg for w in _FUNDS_WORDS)
 
 
-def band_pct(bands: Any, entry_price: float) -> float:
-    """The % of the premium band the entry fill falls in: below the first bound, up to and including the second,
-    ... (e.g. ((80, 20), (150, 15), (inf, 8)): 79.95 -> 20, 80 -> 15, 150 -> 15, 150.05 -> 8)."""
-    first = True
-    for bound, pct in bands:
-        if (entry_price < bound) if first else (entry_price <= bound):
-            return float(pct)
-        first = False
-    return float(bands[-1][1])
-
-
 def _partial_plan(p: Any, lot_size: int, entry_price: float | None = None, tick_size: float = 0.05) -> dict[str, Any]:
     """A scale-out target as stored on the trade. Premium targets get their level from the entry fill."""
     if getattr(p, "premium_bands", None):
@@ -1274,6 +1314,18 @@ def _partial_plan(p: Any, lot_size: int, entry_price: float | None = None, tick_
                 "qty": p.lots * lot_size, "done": False, "filled": 0, "price": None, "spot": None}
     return {"label": p.label, "basis": "spot", "level": p.spot_level, "side": p.side, "qty": p.lots * lot_size,
             "done": False, "filled": 0, "price": None, "spot": None}
+
+
+def _runner_txt(lt: LiveTrade, reason: str) -> str:
+    r = lt.runner
+    if not reason.startswith("runner_") or r is None:
+        return ""
+    return f" floor={_f(r.floor)} peak={_f(r.peak)}" + _runner_extra(r)
+
+
+def _runner_extra(r: RunnerState) -> str:
+    out = f" exit_level={_f(r.exit_level)} (buffer {r.buffer_pct:g}%)" if r.buffer_pct else ""
+    return out + (f" timeout={r.timeout_at:%H:%M:%S}" if r.timeout_at is not None else "")
 
 
 def _f(v: float | None) -> str:

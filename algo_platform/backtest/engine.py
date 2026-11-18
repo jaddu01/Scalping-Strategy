@@ -21,7 +21,8 @@ from core.events import Category, Level
 from core.options_math import next_weekly_expiries, option_premium
 from core.settings_schema import Charges
 from engine.charges import option_charges
-from engine.exit_manager import ExitState, evaluate_exit, evaluate_partial
+from engine.exit_manager import (ExitState, evaluate_exit, evaluate_partial, runner_from_plan, runner_on_fill,
+                                 runner_on_premium)
 from engine.market_data import series_of
 from strategies.base import EntrySignal, Strategy, TradeInfo
 from strategies.registry import get_template
@@ -193,7 +194,8 @@ class BacktestContext:
                                    "side": "above", "qty": p.lots * self.cfg.lot_size, "done": False}
                                   if p.premium_pct is not None else
                                   {"label": p.label, "basis": "spot", "level": p.spot_level, "side": p.side,
-                                   "qty": p.lots * self.cfg.lot_size, "done": False}) for p in plan.partial_targets])
+                                   "qty": p.lots * self.cfg.lot_size, "done": False}) for p in plan.partial_targets],
+                       runner=runner_from_plan(plan.runner, prem))
         trade = SimTrade(trade_id=tid, slot_id=signal.slot_id, day=self.now().date(), direction=signal.direction.value,
                          symbol=symbol, strike=signal.option.strike or 0.0, expiry=signal.option.expiry or self.now().date(),
                          lots=signal.lots, qty=qty, signal_time=self.now(), entry_spot=signal.spot,
@@ -259,12 +261,26 @@ class BacktestContext:
                                 "rsi": snap.get("rsi") if snap else None})
         self.emit("PARTIAL_EXIT", f"{p['label'].upper()} sold qty={q} price={out:.2f} "
                   f"pnl={(out - t.entry_premium) * q:.2f} remaining={t.open_qty}", trade_id=t.trade_id)
+        r = t.state.runner
+        if r is None or t.open_qty <= 0:
+            return
+        p["filled"], p["price"] = q, out  # booked: the runner floor arms on the start TP's fill (as live)
+        event = runner_on_fill(r, t.state.partials, t.entry_premium, self.now())
+        if event == "armed":
+            self.emit("RUNNER_FLOOR_ARMED", f"start={r.start} step_floor={_f(r.step_floor)} trail={r.trail_pct:g}% "
+                      f"peak={_f(r.peak)} floor={_f(r.floor)} qty={t.open_qty}", trade_id=t.trade_id)
+        elif event == "raised":
+            self.emit("RUNNER_FLOOR_RAISED", f"after={p['label']} step_floor={_f(r.step_floor)} peak={_f(r.peak)} "
+                      f"floor={_f(r.floor)}", trade_id=t.trade_id)
 
     async def check_exit(self) -> None:
         t = self.open
         if t is None or self.spot_price is None:
             return
         prem = self.premium(t.strike, t.expiry, t.direction == "CE_BUY")
+        r = t.state.runner
+        if r is not None and runner_on_premium(r, prem)[1]:
+            self.emit("RUNNER_FLOOR_RAISED", f"peak={_f(r.peak)} floor={_f(r.floor)}", trade_id=t.trade_id)
         reason = evaluate_exit(t.state, self.spot_price, prem, self.now())
         floor = t.meta.get("protective_floor")
         if reason is None and floor and prem <= floor:
@@ -299,11 +315,18 @@ class BacktestContext:
         t.charges = option_charges(self.cfg.charges, t.entry_premium * t.qty, sold_value).total
         t.net = round(t.gross - t.charges, 2)
         self.open = None
-        self.emit("EXIT", f"EXIT reason={reason} premium_in={t.entry_premium:.2f} premium_out={t.exit_premium:.2f} pnl={t.gross:.2f}",
-                  trade_id=t.trade_id)
+        r = t.state.runner
+        runner_txt = (f" floor={_f(r.floor)} peak={_f(r.peak)}"
+                      if reason.startswith("runner_") and r is not None else "")
+        self.emit("EXIT", f"EXIT reason={reason} premium_in={t.entry_premium:.2f} premium_out={t.exit_premium:.2f} "
+                          f"pnl={t.gross:.2f}{runner_txt}", trade_id=t.trade_id)
         if self.strategy is not None:
             await self.strategy.on_trade_update(TradeInfo(trade_id=t.trade_id, slot_id=t.slot_id, direction=t.direction,
                                                           status="CLOSED", exit_reason=reason, pnl=t.gross))
+
+
+def _f(v: float | None) -> str:
+    return "-" if v is None else f"{v:.2f}"
 
 
 def _path(c: Candle) -> list[tuple[int, float]]:

@@ -14,7 +14,9 @@ from pydantic import BaseModel, ValidationError
 # schedule). The take-profit choices are personal too: TP on/off, 2 or 4 targets, the % levels and the lots.
 PERSONAL_PARAMS = ("lots", "tp1_lots", "tp2_lots", "tp3_lots", "tp4_lots",
                    "tp_enabled", "tp_mode", "tp_basis", "tp1_value", "tp2_value",
-                   "tp_band1_max", "tp_band2_max", "tp_pcts_low", "tp_pcts_mid", "tp_pcts_high")
+                   "tp_band1_max", "tp_band2_max", "tp_pcts_low", "tp_pcts_mid", "tp_pcts_high",
+                   "runner_protect", "runner_start", "runner_step_floor", "runner_trail_pct_low",
+                   "runner_trail_pct_mid", "runner_trail_pct_high", "runner_buffer_pct", "runner_timeout_min")
 
 
 def lots_of(params: dict[str, Any] | None) -> Any:

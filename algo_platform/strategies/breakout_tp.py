@@ -13,6 +13,22 @@ actual fill), lots TP1-TP4 (automatic 3/3/2/2 of 10); they may sell the whole po
   below 80           20 %   30 %   40 %   50 %
   80 - 150           15 %   22 %   30 %   40 %
   above 150           8 %   12 %   20 %   25 %
+
+Protect the runner (runner_protect, off by default): once the start TP's sell has FILLED (auto = TP2 with two
+targets, TP3 with four), the lots still open get a premium floor, managed by the platform like the spot SL (no
+order at the broker):
+  step floor     = the level of the TP before the last filled TP (the entry fill if only TP1 has filled);
+                   it moves up each time another TP fills
+                   (step floor "tp1": TP1's level, fixed, instead of "one behind")
+  running floor  = highest premium since the floor started × (1 − trail %); trail % by the entry fill's band
+                   (below 80: 20 %, 80-150: 15 %, above 150: 10 %; 0 = no trailing for that band)
+  floor          = max(step, running), rounded down to the tick, and it never moves down.
+An option tick at or below floor × (1 − buffer %) exits all remaining lots. Exit reason: runner_floor_fallback_tp2
+(tp1, entry, ...: the TP level that set the floor) or runner_floor_trail (the trailing % set it). Optional timeout:
+the rest exits (runner_timeout) N minutes after TP1 filled, once the floor is on; a TP reached on that tick sells
+first. The spot SL is checked first; the spot SL and the hard exit stay in force, whichever is hit first wins.
+Unfilled TPs (e.g. TP4) stay active.
+Like the TP choice, a change applies from the next trade.
 """
 from __future__ import annotations
 
@@ -66,6 +82,73 @@ class TPSettings(BreakoutBaseSettings):
                                       "TP1 / TP2 lots then stay the two-target split). Own split: set all of "
                                       "TP1-TP4 lots")
     tp4_lots: int = Field(0, ge=0, le=200, title="TP4 lots (4 TPs)")
+    runner_protect: bool = Field(
+        False, title="Protect the runner",
+        description="On: after the start TP has filled, the lots still open exit when the premium falls to a floor "
+                    "(step: the TP before the last filled one; trailing: the peak minus the band's %). Needs TP on "
+                    "and 'measured in' = premium_pct. A change applies from the next trade")
+    runner_start: Literal["auto", "tp1", "tp2", "tp3"] = Field(
+        "auto", title="Runner floor starts after",
+        description="auto = the last TP before the runner: TP2 with two targets, TP3 with 4 TPs. The floor starts "
+                    "when that TP's sell has filled")
+    runner_step_floor: Literal["off", "one_behind", "tp1"] = Field(
+        "one_behind", title="Runner step floor",
+        description="one_behind: the level of the TP before the last filled TP (the entry fill after TP1); moves "
+                    "up as more TPs fill · tp1: TP1's level, fixed · off: trailing floor only")
+    runner_trail_pct_low: float = Field(20.0, ge=0, lt=100, title="Runner trail % (entry premium in the low band)",
+                                        description="Floor = highest premium since the start × (1 − %); 0 = no "
+                                                    "trailing. Bands as the 4 TPs (below 80 / 80-150 / above 150)")
+    runner_trail_pct_mid: float = Field(15.0, ge=0, lt=100, title="Runner trail % (middle band)")
+    runner_trail_pct_high: float = Field(10.0, ge=0, lt=100, title="Runner trail % (high band)")
+    runner_buffer_pct: float = Field(0.0, ge=0, le=20, title="Runner floor buffer %",
+                                     description="Exit when the premium is at or below floor × (1 − %), a little "
+                                                 "below the level against noise; 0 = exactly at the floor")
+    runner_timeout_min: int = Field(0, ge=0, le=375, title="Runner timeout (minutes after TP1 filled)",
+                                    description="0 = off. Once the floor is on, the remaining lots exit this many "
+                                                "minutes after TP1's sell filled (reason runner_timeout)")
+
+    @model_validator(mode="after")
+    def _runner_checks(self) -> "TPSettings":
+        if not self.runner_protect:
+            return self
+        if not self.tp_enabled:
+            raise ValueError("Protect the runner needs 'Use TP1 / TP2' on: the floor starts after a TP has filled")
+        if self.tp_basis != "premium_pct":
+            raise ValueError("Protect the runner needs 'TP1/TP2 measured in' = premium_pct (the floor is on the "
+                             "option premium)")
+        start = self.runner_start_label()
+        lots = list(self.split4()) if self.tp_mode == "four_by_premium" else list(self.split())
+        n = int(start[2])
+        if n > len(lots):
+            raise ValueError(f"Runner floor starts after {start.upper()}, but {self.tp_mode} has only TP1-TP{len(lots)}; "
+                             f"choose auto or TP1-TP{len(lots)}")
+        if lots[n - 1] <= 0:
+            raise ValueError(f"Runner floor starts after {start.upper()}, but {start.upper()} gets no lots with "
+                             f"{self.lots} lots; choose an earlier TP or more lots")
+        if self.lots - sum(lots[:n]) < 1:
+            raise ValueError(f"Protect the runner: no lot is left after {start.upper()} "
+                             f"({'/'.join(map(str, lots[:n]))} of {self.lots} lots); choose an earlier TP")
+        if self.runner_step_floor == "tp1" and n == 1:
+            raise ValueError("Runner step floor tp1 with the floor starting after TP1 would sit at the price just "
+                             "sold; start after TP2 / TP3 or use one_behind")
+        if self.runner_step_floor == "off" and not any(
+                (self.runner_trail_pct_low, self.runner_trail_pct_mid, self.runner_trail_pct_high)):
+            raise ValueError("Protect the runner: with the step floor off, set a trail % for at least one band")
+        return self
+
+    def runner_start_label(self) -> str:
+        if self.runner_start != "auto":
+            return self.runner_start
+        return "tp3" if self.tp_mode == "four_by_premium" else "tp2"
+
+    def runner_plan(self) -> dict | None:
+        """The runner config stored on each new trade (None = off); the engine picks the trail % from the fill."""
+        if not (self.runner_protect and self.tp_enabled):
+            return None
+        return {"start": self.runner_start_label(), "step": self.runner_step_floor,
+                "band1_max": self.tp_band1_max, "band2_max": self.tp_band2_max,
+                "trail_pcts": [self.runner_trail_pct_low, self.runner_trail_pct_mid, self.runner_trail_pct_high],
+                "buffer_pct": self.runner_buffer_pct, "timeout_min": self.runner_timeout_min}
 
     @model_validator(mode="after")
     def _tp_checks(self) -> "TPSettings":
@@ -179,6 +262,10 @@ class NiftyRefBreakoutTP(NiftyRefBreakout):
         if not self.settings.tp_enabled:
             return []
         return tp_levels(self.settings, direction, entry_spot, ref)
+
+    def runner_plan(self) -> dict | None:
+        assert isinstance(self.settings, TPSettings)
+        return self.settings.runner_plan()
 
 
 @register

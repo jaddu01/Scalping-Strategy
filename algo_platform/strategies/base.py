@@ -70,6 +70,9 @@ class ExitPlan:
     tp_premium_pct: float | None = None  # exit when premium >= fill * (1 + pct/100)
     protective_sl_pct: float | None = None  # broker-side disaster SL on premium
     partial_targets: list[PartialTarget] = field(default_factory=list)  # scale-out levels, in order
+    # runner protection after the start TP fills: {"start": "tp2", "step": "one_behind", "band1_max": 80,
+    # "band2_max": 150, "trail_pcts": [20, 15, 10]}; None = off. The engine picks the trail % from the entry fill
+    runner: dict[str, Any] | None = None
 
 
 @dataclass

@@ -230,7 +230,7 @@
       <td class="num">${num(p.spot)}<div class="muted small">SL ${num(p.spot_sl)} (${esc(p.spot_sl_side === "below" ? "≤" : "≥")})</div></td>
       <td class="num ${p.sl_distance !== null && p.sl_distance < 10 ? "neg" : ""}">${num(p.sl_distance)}</td>
       <td class="small">${p.protective_sl_order_id ? `${esc(p.protective_sl_order_id)}<br>trg ${num(p.protective_sl_trigger)} <span class="badge ${esc(p.protective_sl_status)}">${esc(p.protective_sl_status)}</span>` : '<span class="neg">none</span>'}</td>
-      <td class="num small">${p.tp_level !== null && p.tp_level !== undefined ? `${num(p.tp_level)} (${esc(p.tp_kind)})<br>dist ${num(p.tp_distance)}` : "–"}</td>
+      <td class="num small">${p.tp_level !== null && p.tp_level !== undefined ? `${num(p.tp_level)} (${esc(p.tp_kind)})<br>dist ${num(p.tp_distance)}` : "–"}${p.runner ? `<div class="muted small">${esc(p.runner)}</div>` : ""}</td>
       <td class="num countdown" data-secs="${p.seconds_to_exit}">${mmss(p.seconds_to_exit)}</td>
       <td><span class="badge ${esc(p.status)}">${esc(p.status)}</span></td></tr>`).join("") || `<tr><td colspan="13" class="muted">No open positions.</td></tr>`;
     const ext = s.external_positions || [];

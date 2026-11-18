@@ -9,6 +9,10 @@ Same rules as the other breakout strategies:
   first breakout only, one trade per slot, no re-entry after the SL, one open position at a time; 10 lots.
 The exits are at the sharp time (Exit early by = 0 s). The TP version also sells 40 % of the lots at
 TP1 (+30 % premium) and 40 % at TP2 (+40 %); the rest exits on the spot SL or the hard exit.
+"Protect the runner" (off by default) adds a premium floor under those last lots once TP2 (TP3 with 4 TPs) has
+filled: the TP before the last filled one, or the peak minus 20 / 15 / 10 % by entry band, whichever is higher; it
+only rises and exits the rest (reason runner_floor_fallback_tp2 / _tp1 / runner_floor_trail), optionally a buffer %
+below the floor and after a timeout counted from TP1's fill (details in strategies/breakout_tp.py).
 """
 from __future__ import annotations
 
