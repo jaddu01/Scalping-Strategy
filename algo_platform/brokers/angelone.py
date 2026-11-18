@@ -673,6 +673,12 @@ class AngelOneAdapter(BrokerAdapter):
                 out[(str(row.get("exchange")), str(row.get("symbolToken")))] = _f(row.get("ltp"))
         return out
 
+    async def search_symbols(self, exchange: str, text: str) -> list[dict[str, Any]]:
+        """Angel's symbol search (any segment, also those not loaded into the instrument list, e.g. MCX):
+        [{"exchange", "tradingsymbol", "symboltoken"}, ...]."""
+        rows = await self._call("profile", "searchScrip", "searchScrip", exchange.upper(), text.upper())
+        return list(rows or [])
+
     async def get_historical_candles(self, instrument: Instrument, timeframe_min: int, start: datetime,
                                      end: datetime) -> list[Candle]:
         interval = INTERVALS.get(timeframe_min)

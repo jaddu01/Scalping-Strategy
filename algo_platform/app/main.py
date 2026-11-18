@@ -104,6 +104,7 @@ def create_app(config: AppConfig | None = None, *, start_engine: bool | None = N
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
+    from app.api import admin_data
     from app.api import routes as api_routes
     from app.api import ws as ws_routes
     from app.web import (routes_accounts, routes_admin, routes_auth, routes_backtest, routes_compare,
@@ -111,6 +112,6 @@ def create_app(config: AppConfig | None = None, *, start_engine: bool | None = N
                          routes_trades)
 
     for mod in (routes_auth, routes_dashboard, routes_shared, routes_strategies, routes_compare, routes_accounts, routes_settings, routes_trades,
-                routes_logs, routes_backtest, routes_admin, api_routes, ws_routes):
+                routes_logs, routes_backtest, routes_admin, api_routes, admin_data, ws_routes):
         app.include_router(mod.router)
     return app
