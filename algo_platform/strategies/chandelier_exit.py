@@ -11,6 +11,8 @@ Exits (spot levels, watched on every tick by the engine):
   stop       the previous candle's low (long) / high (short), +- `sl_buffer_points`; risk R = |entry - stop|
   TP1 / TP2  sell `tp1_lots` at `tp1_rr` x R, `tp2_lots` at `tp2_rr` x R
   TP3        the remaining lots at `tp3_rr` x R
+  TP4 / TP5  optional (0 lots = off): with lots set, TP3 (and TP4) sell their lots and the LAST TP that has lots
+             closes the remaining lots (e.g. 3/2/2/2/1 at 2/3/4/5/6 R)
   optional   stop to the entry price once TP1 is reached (`move_sl_to_entry_after_tp1`)
   opposite   an opposite signal closes what is left and opens the new direction once flat (`exit_on_opposite`)
   hard exit  the 15:15 square-off
@@ -74,8 +76,14 @@ class ChandelierSettings(RegimeSettings):
     tp2_lots: int = Field(4, ge=0, le=200, title="TP2 lots")
     tp3_rr: float = Field(4.0, ge=0.5, le=20, title="TP3 (× risk)")
     tp3_lots: int = Field(2, ge=0, le=200, title="TP3 lots",
-                          description="Lots per trade = TP1 + TP2 + TP3 lots (4 + 4 + 2 = 10), also when targets "
-                                      "are off")
+                          description="Lots per trade = TP1 + TP2 + TP3 (+ TP4 + TP5) lots (4 + 4 + 2 = 10), also "
+                                      "when targets are off")
+    tp4_rr: float = Field(5.0, ge=0.5, le=20, title="TP4 (× risk)", description="Used only when TP4 lots > 0")
+    tp4_lots: int = Field(0, ge=0, le=200, title="TP4 lots",
+                          description="0 = off. With TP4 (or TP5) lots set, TP3 sells its lots and the last TP with "
+                                      "lots closes the rest")
+    tp5_rr: float = Field(6.0, ge=0.5, le=20, title="TP5 (× risk)", description="Used only when TP5 lots > 0")
+    tp5_lots: int = Field(0, ge=0, le=200, title="TP5 lots", description="0 = off")
     # --- Pine "Stop Loss"
     sl_buffer_points: float = Field(0.0, ge=0, le=500, title="SL buffer beyond the previous candle (points)")
     move_sl_to_entry_after_tp1: bool = Field(False, title="Move SL to entry after TP1 is hit")
@@ -118,8 +126,14 @@ class ChandelierSettings(RegimeSettings):
             raise ValueError(f"{self.underlying} is not a BSE index: set Index exchange to NSE")
         if not (self.tp1_rr < self.tp2_rr < self.tp3_rr):
             raise ValueError("targets must increase: TP1 < TP2 < TP3")
+        prev = ("TP3", self.tp3_rr)
+        for name, rr, lots in (("TP4", self.tp4_rr, self.tp4_lots), ("TP5", self.tp5_rr, self.tp5_lots)):
+            if lots:
+                if rr <= prev[1]:
+                    raise ValueError(f"targets must increase: {name} ({rr:g} R) must be above {prev[0]} ({prev[1]:g} R)")
+                prev = (name, rr)
         if self.lots <= 0:
-            raise ValueError("TP1 + TP2 + TP3 lots must be more than 0")
+            raise ValueError("TP1 + TP2 + TP3 (+ TP4 + TP5) lots must be more than 0")
         if not (self.allow_long or self.allow_short):
             raise ValueError("allow long trades, short trades, or both")
         if not (MARKET_OPEN <= self.entry_start < self.entry_end <= MARKET_CLOSE):
@@ -130,7 +144,16 @@ class ChandelierSettings(RegimeSettings):
 
     @property
     def lots(self) -> int:
-        return self.tp1_lots + self.tp2_lots + self.tp3_lots
+        return self.tp1_lots + self.tp2_lots + self.tp3_lots + self.tp4_lots + self.tp5_lots
+
+    def targets(self) -> list[tuple[str, float, int]]:
+        """(label, R multiple, lots) of the targets in use, in order. The last one closes the remaining lots: TP3 as
+        in the script, or the highest of TP4 / TP5 that has lots. TP1 / TP2 (/ TP3, TP4) with 0 lots are skipped."""
+        last = 5 if self.tp5_lots else (4 if self.tp4_lots else 3)
+        out = [("tp1", self.tp1_rr, self.tp1_lots), ("tp2", self.tp2_rr, self.tp2_lots),
+               ("tp3", self.tp3_rr, self.tp3_lots), ("tp4", self.tp4_rr, self.tp4_lots),
+               ("tp5", self.tp5_rr, self.tp5_lots)][:last]
+        return [t for i, t in enumerate(out) if t[2] > 0 or i == last - 1]
 
     @property
     def step(self) -> int:
@@ -203,6 +226,12 @@ class Signal:
     be_moved: bool = False
     reverse_requested: bool = False
     regime: dict[str, Any] | None = None
+    tp4: float | None = None  # only when TP4 / TP5 lots are set (saved setups from before have none)
+    tp5: float | None = None
+
+    def levels(self) -> list[tuple[str, float]]:
+        return [(k, v) for k, v in (("tp1", self.tp1), ("tp2", self.tp2), ("tp3", self.tp3), ("tp4", self.tp4),
+                                    ("tp5", self.tp5)) if v is not None]
 
     @property
     def long(self) -> bool:
@@ -221,12 +250,12 @@ class Signal:
     def from_state(cls, d: dict[str, Any]) -> "Signal":
         d = dict(d)
         d["candle_start"] = datetime.fromisoformat(d["candle_start"])
-        return cls(**d)
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
     def to_dict(self, tf: int) -> dict[str, Any]:
         return {"no": self.no, "time": fmt_hm(self.candle_start + timedelta(minutes=tf)), "direction": self.side,
                 "entry": self.entry, "stop": self.stop, "risk": round(self.risk, 2), "tp1": self.tp1, "tp2": self.tp2,
-                "tp3": self.tp3, "tp_hit": self.tp_hit, "be": self.be_moved, "state": self.state,
+                "tp3": self.tp3, "tp4": self.tp4, "tp5": self.tp5, "tp_hit": self.tp_hit, "be": self.be_moved, "state": self.state,
                 "result": self.result, "trade_id": self.trade_id,
                 "regime": (self.regime or {}).get("note"), "regime_block": bool((self.regime or {}).get("would_block"))}
 
@@ -402,7 +431,9 @@ class ChandelierExit(Strategy):
         x = Signal(no=len(self.signals) + 1, side="CE_BUY" if long else "PE_BUY", candle_start=c.start,
                    entry=round(c.close, 2), stop=stop, risk=round(risk, 2),
                    tp1=round(c.close + sg * s.tp1_rr * risk, 2), tp2=round(c.close + sg * s.tp2_rr * risk, 2),
-                   tp3=round(c.close + sg * s.tp3_rr * risk, 2))
+                   tp3=round(c.close + sg * s.tp3_rr * risk, 2),
+                   tp4=round(c.close + sg * s.tp4_rr * risk, 2) if s.tp4_lots else None,
+                   tp5=round(c.close + sg * s.tp5_rr * risk, 2) if s.tp5_lots else None)
         self.signals.append(x)
         day_open = combine(c.start.date(), MARKET_OPEN)
         reason = None
@@ -451,8 +482,12 @@ class ChandelierExit(Strategy):
             x.state, x.result = "REJECTED", "no_expiry_available"
             return
         side = "above" if x.long else "below"
-        partials = ([PartialTarget(lbl, lvl, side, n) for lbl, lvl, n in
-                     (("tp1", x.tp1, s.tp1_lots), ("tp2", x.tp2, s.tp2_lots)) if n > 0] if s.use_targets else [])
+        lvl = dict(x.levels())
+        tps = s.targets()
+        # every target but the last sells its lots; the last closes what is left (tp_spot_level)
+        partials = ([PartialTarget(lbl, lvl[lbl], side, n) for lbl, _, n in tps[:-1] if n > 0 and lbl in lvl]
+                    if s.use_targets else [])
+        final = lvl.get(tps[-1][0]) if s.use_targets else None
         signal = EntrySignal(
             slot_id=x.slot_id, direction=Direction(x.side),
             option=InstrumentKey(underlying=s.underlying, exchange=opt_exch,
@@ -463,13 +498,13 @@ class ChandelierExit(Strategy):
             exit_plan=ExitPlan(exit_at=combine(now.date(), self.ctx.square_off_time()), underlying=self.spot,
                                spot_sl=x.stop if s.use_stop_loss else None,
                                spot_sl_side="below" if x.long else "above",
-                               tp_spot_level=x.tp3 if s.use_targets else None, tp_spot_side=side,
+                               tp_spot_level=final, tp_spot_side=side,
                                protective_sl_pct=s.protective_sl_pct or None, partial_targets=partials),
             meta={"setup_no": x.no, "underlying": s.underlying, "candle": fmt_hm(x.candle_start), "risk_pts": x.risk,
-                  "tp1": x.tp1, "tp2": x.tp2, "tp3": x.tp3, "regime_entry": x.regime},
+                  "tp1": x.tp1, "tp2": x.tp2, "tp3": x.tp3, "tp4": x.tp4, "tp5": x.tp5, "regime_entry": x.regime},
         )
         levels = (f"SL={x.stop:.2f} (risk {x.risk:.2f}) " if s.use_stop_loss else "no SL ") + (
-            f"TP1={x.tp1:.2f} TP2={x.tp2:.2f} TP3={x.tp3:.2f}" if s.use_targets else "no targets (held to the opposite "
+            " ".join(f"{k.upper()}={v:.2f}" for k, v in x.levels()) if s.use_targets else "no targets (held to the opposite "
                                                                                       "signal / 15:15)")
         self._emit("SETUP", f"ENTRY #{x.no} {x.side} close={x.entry:.2f} {levels}"
                             + (f" regime={x.regime['note']}" if x.regime else ""), setup=x.no)
@@ -491,8 +526,7 @@ class ChandelierExit(Strategy):
         if a is None or a.state != "IN_TRADE" or not a.trade_id or not self.settings.use_targets:
             return
         p = tick.ltp
-        hit = [lbl for lbl, lvl in (("tp1", a.tp1), ("tp2", a.tp2), ("tp3", a.tp3))
-               if (p >= lvl if a.long else p <= lvl)]
+        hit = [lbl for lbl, lvl in a.levels() if (p >= lvl if a.long else p <= lvl)]
         if hit and "+".join(hit) != a.tp_hit and len(hit) > len(a.tp_hit.split("+") if a.tp_hit else []):
             a.tp_hit = "+".join(hit)
             self._persist()
@@ -551,4 +585,5 @@ class ChandelierExit(Strategy):
                        "close": ln.last.close if ln.last else None, "tf": tf},
                 "ce_signals": [x.to_dict(tf) for x in self.signals],
                 "use_stop_loss": self.settings.use_stop_loss, "use_targets": self.settings.use_targets,
+                "tp_labels": [t[0] for t in self.settings.targets()] if self.settings.use_targets else [],
                 "cold": self.cold, "pending_settings": self.has_pending_settings}

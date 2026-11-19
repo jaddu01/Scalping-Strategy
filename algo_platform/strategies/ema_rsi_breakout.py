@@ -10,6 +10,8 @@ Pine logic on 5-minute NIFTY spot candles:
 Exits on this platform (TP1 / TP2 replace the script's single RSI 70 exit):
   TP1            sell 40 % of the lots as soon as the live RSI reaches 68     (PE: RSI <= 32)
   TP2            sell 40 % more when the live RSI reaches 80                  (PE: RSI <= 20)
+  TP3 / TP4      optional (0 lots = off): with TP3 lots set (own split, e.g. 3/3/2) TP3 sells at RSI 85 (PE <= 15);
+                 with TP4 lots too (e.g. 3/3/2/2) TP4 at 90 (PE <= 10); lots not sold at the TPs run on as below
                  a target RSI already reached at entry first has to come back and then reach it again
                  live RSI = RSI with the current tick as the forming candle's close (TradingView's real-time
                  value), so a target fires mid-candle; set "RSI targets checked on" to candle_close for the
@@ -86,6 +88,14 @@ class EmaRsiBreakoutSettings(RegimeSettings):
     tp2_rsi_pe: float = Field(20, gt=0, lt=100, title="TP2: RSI level (PE)",
                               description="Sell TP2 lots of a PE trade when RSI falls to this or below")
     tp2_lots: int = Field(0, ge=0, le=200, title="TP2 lots", description="0 = automatic (40 % of Lots: 10 -> 4)")
+    tp3_rsi: float = Field(85, gt=0, lt=100, title="TP3: RSI level (CE)", description="Used only when TP3 lots > 0")
+    tp3_rsi_pe: float = Field(15, gt=0, lt=100, title="TP3: RSI level (PE)")
+    tp3_lots: int = Field(0, ge=0, le=200, title="TP3 lots",
+                          description="0 = off (TP1 / TP2 only). For 3 TPs set TP1-TP3 lots yourself (e.g. 3/3/2 of "
+                                      "10), for 4 also TP4; lots not sold at the TPs run to the trail / stop / hard exit")
+    tp4_rsi: float = Field(90, gt=0, lt=100, title="TP4: RSI level (CE)", description="Used only when TP4 lots > 0")
+    tp4_rsi_pe: float = Field(10, gt=0, lt=100, title="TP4: RSI level (PE)")
+    tp4_lots: int = Field(0, ge=0, le=200, title="TP4 lots", description="0 = off (3 TPs when TP3 lots are set)")
     trail_after_tp1: bool = Field(
         True, title="Trail the stop after TP1",
         description="Once TP1 has sold, the spot stop-loss of the remaining lots follows the best price since "
@@ -141,6 +151,8 @@ class EmaRsiBreakoutSettings(RegimeSettings):
                 raise ValueError("TP2 RSI level must be greater than TP1 RSI level")
             if self.tp2_rsi_pe >= self.tp1_rsi_pe:
                 raise ValueError("PE TP2 RSI level must be lower than PE TP1 RSI level")
+            if self.tp3_lots or self.tp4_lots:
+                return self._four_checks()
             if (self.tp1_lots == 0) != (self.tp2_lots == 0):
                 raise ValueError("set both TP1 lots and TP2 lots to 0 (automatic split) or both to a number of lots")
             a, b = self.split()
@@ -148,6 +160,40 @@ class EmaRsiBreakoutSettings(RegimeSettings):
                 raise ValueError(f"TP1 lots + TP2 lots ({a + b}) must be less than Lots ({self.lots}) so at least "
                                  f"one lot runs to the hard exit")
         return self
+
+    def _four_checks(self) -> "EmaRsiBreakoutSettings":
+        """3 TPs (TP3 lots set, TP4 lots 0) or 4 TPs: TP1-TP3 (and TP4) lots set by hand, levels in order."""
+        if not self.tp3_lots:
+            raise ValueError("TP4 needs TP3: set TP3 lots too (TP1-TP3 for 3 targets, TP1-TP4 for 4)")
+        n = 4 if self.tp4_lots else 3
+        own = (self.tp1_lots, self.tp2_lots, self.tp3_lots, self.tp4_lots)[:n]
+        if not all(own):
+            raise ValueError(f"TP3{' / TP4' if n == 4 else ''}: set each of TP1-TP{n} lots "
+                             f"(e.g. {'3/3/2/2' if n == 4 else '3/3/2'}); TP3 and TP4 lots both 0 = TP1 / TP2 only")
+        if sum(own) > self.lots:
+            raise ValueError(f"TP1-TP{n} lots ({sum(own)}) are more than Lots ({self.lots})")
+        ce = (self.tp1_rsi, self.tp2_rsi, self.tp3_rsi, self.tp4_rsi)[:n]
+        pe = (self.tp1_rsi_pe, self.tp2_rsi_pe, self.tp3_rsi_pe, self.tp4_rsi_pe)[:n]
+        order = " < ".join(f"TP{i + 1}" for i in range(n))
+        if any(b <= a for a, b in zip(ce, ce[1:])):
+            raise ValueError(f"CE TP RSI levels must rise: {order}")
+        if any(b >= a for a, b in zip(pe, pe[1:])):
+            raise ValueError(f"PE TP RSI levels must fall: {order.replace('<', '>')}")
+        if self.tp3_rsi <= self.rsi_mid or self.tp3_rsi_pe >= self.rsi_mid:
+            raise ValueError(f"TP3 RSI levels must be beyond the middle level ({self.rsi_mid:g})")
+        return self
+
+    def targets(self, is_long: bool) -> list[tuple[str, float, int]]:
+        """(label, RSI level, lots) of the targets in use: TP1 / TP2 (automatic 40 / 40 % or own lots), or TP1-TP4
+        when TP3 / TP4 lots are set. PE levels fall (32, 20, ...)."""
+        if self.tp3_lots or self.tp4_lots:
+            lots = (self.tp1_lots, self.tp2_lots, self.tp3_lots, self.tp4_lots)
+        else:
+            lots = self.split()
+        ce = (self.tp1_rsi, self.tp2_rsi, self.tp3_rsi, self.tp4_rsi)
+        pe = (self.tp1_rsi_pe, self.tp2_rsi_pe, self.tp3_rsi_pe, self.tp4_rsi_pe)
+        lv = ce if is_long else pe
+        return [(f"tp{i + 1}", lv[i], n) for i, n in enumerate(lots) if n > 0]
 
     def split(self) -> tuple[int, int]:
         if self.tp1_lots == 0 and self.tp2_lots == 0:
@@ -486,9 +532,7 @@ class EmaRsiBreakout(Strategy):
 
         if s.tp_enabled:
             fired = False
-            targets = ((("tp1", s.tp1_rsi), ("tp2", s.tp2_rsi)) if is_long else
-                       (("tp1", s.tp1_rsi_pe), ("tp2", s.tp2_rsi_pe)))
-            for label, level in targets:
+            for label, level, _ in s.targets(is_long):
                 hit = rsi >= level if is_long else rsi <= level
                 if label in a.tp_wait:
                     if not hit:
@@ -551,16 +595,14 @@ class EmaRsiBreakout(Strategy):
         if rsi is None:
             return []
         is_long = a.direction == "CE_BUY"
-        levels = (("tp1", s.tp1_rsi), ("tp2", s.tp2_rsi)) if is_long else (("tp1", s.tp1_rsi_pe), ("tp2", s.tp2_rsi_pe))
-        late = [lbl for lbl, lvl in levels if (rsi >= lvl if is_long else rsi <= lvl)]
+        late = [lbl for lbl, lvl, _ in s.targets(is_long) if (rsi >= lvl if is_long else rsi <= lvl)]
         if late:
             self._emit("TP_WAIT", f"setup #{a.no} RSI={rsi:.2f} already past {', '.join(x.upper() for x in late)} "
                                   f"at entry: they wait until RSI comes back", setup=a.no, rsi=rsi, targets=late)
         return late
 
     def _target_lots(self, label: str) -> int:
-        a, b = self.settings.split()
-        return a if label == "tp1" else b
+        return next((n for lbl, _, n in self.settings.targets(True) if lbl == label), 0)
 
     # ---- ticks: the breakout entry
     async def on_tick(self, tick: Tick) -> None:
@@ -610,9 +652,7 @@ class EmaRsiBreakout(Strategy):
             self._persist()
             return
         d = Direction(a.direction)
-        lots1, lots2 = s.split()
-        targets = ([PartialTarget(lbl, None, "above", n) for lbl, n in (("tp1", lots1), ("tp2", lots2)) if n > 0]
-                   if s.tp_enabled else [])
+        targets = ([PartialTarget(lbl, None, "above", n) for lbl, _, n in s.targets(True)] if s.tp_enabled else [])
         hard_exit = combine(now.date(), self.ctx.square_off_time())
         signal = EntrySignal(
             slot_id=a.slot_id, direction=d,

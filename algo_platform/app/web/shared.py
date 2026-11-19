@@ -12,7 +12,7 @@ from pydantic import BaseModel, ValidationError
 
 # what each partner sets for themselves on their own run; everything else is the shared rules (entries, stops,
 # schedule). The take-profit choices are personal too: TP on/off, 2 or 4 targets, the % levels and the lots.
-PERSONAL_PARAMS = ("lots", "tp1_lots", "tp2_lots", "tp3_lots", "tp4_lots",
+PERSONAL_PARAMS = ("lots", "tp1_lots", "tp2_lots", "tp3_lots", "tp4_lots", "tp5_lots",
                    "tp_enabled", "tp_mode", "tp_basis", "tp1_value", "tp2_value",
                    "tp_band1_max", "tp_band2_max", "tp_pcts_low", "tp_pcts_mid", "tp_pcts_high",
                    "runner_protect", "runner_start", "runner_step_floor", "runner_trail_pct_low",
@@ -20,13 +20,13 @@ PERSONAL_PARAMS = ("lots", "tp1_lots", "tp2_lots", "tp3_lots", "tp4_lots",
 
 
 def lots_of(params: dict[str, Any] | None) -> Any:
-    """Lots per trade for tables: the `lots` setting, or TP1 + TP2 + TP3 lots where the split is the size
+    """Lots per trade for tables: the `lots` setting, or TP1 + ... + TP5 lots where the split is the size
     (Chandelier Exit)."""
     p = params or {}
     if p.get("lots") is not None:
         return p["lots"]
     if p.get("tp3_lots") is not None:
-        return sum(int(p.get(k) or 0) for k in ("tp1_lots", "tp2_lots", "tp3_lots"))
+        return sum(int(p.get(k) or 0) for k in ("tp1_lots", "tp2_lots", "tp3_lots", "tp4_lots", "tp5_lots"))
     return "–"
 
 
