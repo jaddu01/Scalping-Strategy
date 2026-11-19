@@ -19,6 +19,8 @@ from core.events import Category, EventBus, Level
 from engine.calendar import MarketCalendar
 from engine.candles import CandleBuilder, candles_match
 
+SESSION_EXCHANGES = frozenset({"NSE", "NFO", "BSE", "BFO"})  # candles only in market hours (09:15-15:30)
+
 log = logging.getLogger("algo.marketdata")
 RECENT_KEEP = 300  # completed candles kept per index / timeframe for the sideways filter
 
@@ -245,7 +247,13 @@ class MarketDataService:
             self._stale_reported = False
             self._emit("FEED_RECOVERED", "market data ticks flowing again")
         self._ltp[series] = (tick.ltp, tick.ts)
-        self.builder.on_tick(series, tick)
+        if tick.exchange.value in SESSION_EXCHANGES and not self.calendar.is_market_open(now):
+            # NSE / BSE pre-open (09:00-09:15) and after-close prices: shown as LTP, never part of a candle
+            # (19-Nov-2026: 09:00 / 09:05 / 09:10 candles from pre-open ticks flipped the Chandelier and armed an
+            # EMA/RSI setup; the broker's candles and the recordings start at 09:15)
+            self.builder.seen(series, now)
+        else:
+            self.builder.on_tick(series, tick)
         sub = self._subs.get(series)
         if sub is None:
             return

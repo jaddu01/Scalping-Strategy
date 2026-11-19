@@ -52,6 +52,12 @@ class CandleBuilder:
         for key in [k for k in self._working if k[0] == series]:
             self._working[key].complete = False
 
+    def seen(self, series: str, ts: datetime) -> None:
+        """A tick arrived but must not build candles (e.g. NSE pre-open 09:00-09:15): it still counts as "the feed
+        was running", so the first regular candle (09:15) is complete, as when the ticks built candles."""
+        for tf in self._series_tf.get(series) or ():
+            self._since.setdefault((series, tf), to_ist(ts))
+
     def on_tick(self, series: str, tick: Tick) -> None:
         tfs = self._series_tf.get(series)
         if not tfs:

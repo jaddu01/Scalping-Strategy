@@ -260,15 +260,20 @@ class InstanceRuntime:
                     await self.strategy.on_trade_update(info)
                 now = self.now()
                 if self.p.calendar.in_session_window(now):
-                    ticks, self._ticks = list(self._ticks.values()), {}
-                    for t in ticks:
-                        await self.strategy.on_tick(t)
-                    candles, self._candles = self._candles, []
-                    for inst, c in candles:
-                        await self.strategy.on_candle(inst, c)
+                    if self.p.calendar.is_market_open(now):
+                        # ticks and candles from 09:15 only: pre-open prices are not trading prices
+                        ticks, self._ticks = list(self._ticks.values()), {}
+                        for t in ticks:
+                            await self.strategy.on_tick(t)
+                        candles, self._candles = self._candles, []
+                        for inst, c in candles:
+                            await self.strategy.on_candle(inst, c)
+                    else:
+                        self._ticks.clear()
+                        self._candles.clear()
                     if last_timer is None or (now - last_timer).total_seconds() >= 1.0:
                         last_timer = now
-                        await self.strategy.on_timer(now)
+                        await self.strategy.on_timer(now)  # timers run from pre-open (warm-up, start checks)
                 else:
                     self._ticks.clear()
                     self._candles.clear()
