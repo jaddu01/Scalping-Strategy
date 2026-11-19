@@ -348,7 +348,10 @@ async def delete_instance(iid: int, request: Request, user: SessionInfo = Depend
 
 
 @router.get("/strategies/{iid}", response_class=HTMLResponse)
-async def instance_detail(iid: int, request: Request, user: SessionInfo = Depends(current_user)) -> HTMLResponse:
+async def instance_detail(iid: int, request: Request, user: SessionInfo = Depends(current_user),
+                          date: str | None = None) -> HTMLResponse:
+    """A run's page. `?date=YYYY-MM-DD` (a past day, e.g. picked on the dashboard) shows that day's trades and
+    orders instead of today's live slots."""
     p = request.app.state.platform
     with request.app.state.db.session() as s:
         row = s.get(StrategyInstance, iid)
@@ -359,9 +362,18 @@ async def instance_detail(iid: int, request: Request, user: SessionInfo = Depend
         acc = s.get(BrokerAccount, row.broker_account_id) if row.broker_account_id else None
         today = (p.clock.now() if p else None)
         day = today.date() if today else None
-        trades = list(s.scalars(select(Trade).where(Trade.instance_id == iid).order_by(Trade.id.desc()).limit(50)))
-        orders = list(s.scalars(select(OrderRecord).where(OrderRecord.instance_id == iid)
-                                .order_by(OrderRecord.id.desc()).limit(50)))
+        view_day = _past_day(date, day)
+        if view_day is not None:
+            trades = list(s.scalars(select(Trade).where(Trade.instance_id == iid, Trade.trade_date == view_day)
+                                    .order_by(Trade.id)))
+            ids = [t.id for t in trades]
+            orders = list(s.scalars(select(OrderRecord).where(OrderRecord.instance_id == iid,
+                                                              OrderRecord.trade_id.in_(ids))
+                                    .order_by(OrderRecord.id))) if ids else []
+        else:
+            trades = list(s.scalars(select(Trade).where(Trade.instance_id == iid).order_by(Trade.id.desc()).limit(50)))
+            orders = list(s.scalars(select(OrderRecord).where(OrderRecord.instance_id == iid)
+                                    .order_by(OrderRecord.id.desc()).limit(50)))
     cls = get_template(row.template_id)
     params = cls.settings_model.model_validate(row.params or {})
     rt = p.strategies.runtimes.get(iid) if p else None
@@ -369,11 +381,44 @@ async def instance_detail(iid: int, request: Request, user: SessionInfo = Depend
         "inst": row, "account": acc, "template": cls, "params": params.model_dump(mode="json"),
         "risk": InstanceRiskLimits.model_validate(row.risk_limits or {}).model_dump(mode="json"),
         "trades": trades, "orders": orders, "rt": rt.snapshot() if rt else None, "day": day,
+        "view_day": view_day, "day_summary": _day_summary(trades) if view_day else None,
+        "prev_day": _weekday(view_day or day, -1) if day else None,
+        "next_day": _weekday(view_day, 1) if view_day else None,
         "open_position": bool(p and p.trades.open_trade_count(instance_id=iid)),
         "owner": usernames(request.app.state.db).get(row.owner_user_id or 0, "–"),
         "can_edit": can_control(user, row.owner_user_id),
         "shared": _shared_of(request, row),
     })
+
+
+def _past_day(text: str | None, today: Any) -> Any:
+    """The day asked for, if it is a valid date before today; None means today's live view."""
+    from datetime import date as _date
+
+    if not text or today is None:
+        return None
+    try:
+        d = _date.fromisoformat(text)
+    except ValueError:
+        return None
+    return d if d < today else None
+
+
+def _weekday(d: Any, step: int) -> Any:
+    from datetime import timedelta
+
+    x = d + timedelta(days=step)
+    while x.weekday() >= 5:
+        x += timedelta(days=step)
+    return x
+
+
+def _day_summary(trades: list[Trade]) -> dict[str, Any]:
+    closed = [t for t in trades if t.status == "CLOSED"]
+    return {"trades": len(closed), "failed": sum(1 for t in trades if t.status == "FAILED"),
+            "open": sum(1 for t in trades if t.status in ("OPEN", "EXITING", "PENDING_ENTRY")),
+            "wins": sum(1 for t in closed if (t.net_pnl or 0) > 0),
+            "gross": round(sum(t.gross_pnl or 0 for t in closed), 2), "net": round(sum(t.net_pnl or 0 for t in closed), 2)}
 
 
 @router.get("/strategies/{iid}/slots", response_class=HTMLResponse)

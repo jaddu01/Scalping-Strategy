@@ -204,3 +204,52 @@ def test_dashboard_day_filter(client):
     assert client.get("/api/day?date=nonsense").status_code == 422
     html = client.get("/").text
     assert 'id="dash-day"' in html and f'max="{today.isoformat()}"' in html and 'id="loadbar"' in html
+
+
+def test_strategy_page_shows_the_chosen_past_day(client):
+    """Dashboard on a back date -> click a run: its page lists that day's trades and orders, not today's."""
+    from storage.models import OrderRecord, Trade, User
+
+    p = client.app.state.platform
+    today = p.clock.now().date()
+    past = today - timedelta(days=1)
+    while past.weekday() >= 5:
+        past -= timedelta(days=1)
+    with client.app.state.db.session() as s:
+        uid = s.query(User).first().id
+        acc = BrokerAccount(broker_type="paper", label="DayAcc", client_id="D1", credentials_enc="x", enabled=False)
+        s.add(acc)
+        s.flush()
+        inst = StrategyInstance(name="DayRun", template_id="nifty_ref_breakout", params={}, mode="paper", enabled=False,
+                                owner_user_id=uid)
+        s.add(inst)
+        s.flush()
+        iid = inst.id
+        t_past = Trade(trade_ref="TPAST1", instance_id=iid, trade_date=past, direction="CE_BUY", status="CLOSED",
+                       tradingsymbol="NIFTYPASTCE", gross_pnl=1500.0, net_pnl=1400.0,
+                       entry_time=datetime.combine(past, datetime.min.time()).replace(hour=10, minute=5),
+                       exit_time=datetime.combine(past, datetime.min.time()).replace(hour=10, minute=20))
+        s.add_all([t_past,
+                   Trade(trade_ref="TPAST2", instance_id=iid, trade_date=past, direction="PE_BUY", status="FAILED",
+                         tradingsymbol="NIFTYPASTPE", exit_reason="entry_rejected"),
+                   Trade(trade_ref="TTODAY", instance_id=iid, trade_date=today, direction="PE_BUY", status="CLOSED",
+                         tradingsymbol="NIFTYTODAYPE", gross_pnl=-200.0, net_pnl=-250.0)])
+        s.flush()
+        s.add(OrderRecord(account_id=acc.id, broker_order_id="ORD-PAST", trade_id=t_past.id, trade_ref="TPAST1", instance_id=iid,
+                          purpose="ENTRY", exchange="NFO", tradingsymbol="NIFTYPASTCE", side="BUY", order_type="MARKET",
+                          quantity=65, status="COMPLETE"))
+        s.commit()
+    html = client.get(f"/strategies/{iid}?date={past.isoformat()}").text
+    assert f"Trades on {past:%d %b %Y}" in html
+    assert "TPAST1" in html and "TPAST2" in html and "TTODAY" not in html
+    assert "ORD-PAST" in html and "10:05:00 → 10:20:00" in html
+    assert "1 closed trade (1 won)" in html and "1 not filled" in html and "1,400.00" in html
+    assert "Today&#39;s slots" not in html and "Today's slots" not in html
+    assert f"/trades?instance_id={iid}&amp;day_from={past.isoformat()}" in html
+    # today, a future date or a bad date: the normal live page with recent trades of every day
+    for q in ("", f"?date={today.isoformat()}", f"?date={(today + timedelta(days=2)).isoformat()}", "?date=bad"):
+        live = client.get(f"/strategies/{iid}{q}").text
+        assert "Today's slots" in live and "TTODAY" in live and "TPAST1" in live and "Trades on " not in live
+    # the dashboard's run links carry the chosen day
+    js = client.get("/static/app.js").text
+    assert "/strategies/${i.id}${past ? `?date=${encodeURIComponent(viewDay)}` : \"\"}" in js

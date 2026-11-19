@@ -19,10 +19,27 @@
 <p class="muted">{% if shared %}<a href="/strategies/shared/{{ shared.id }}">{{ shared.name }}</a> (shared rules) · {% endif %}{{ template.display_name }} · owner: {{ owner }} · broker: {{ account.label if account else '— none —' }}{% if inst.notes %} · {{ inst.notes }}{% endif %}</p>
 {% if rt and rt.message %}<div class="flash {{ 'err' if rt.status == 'ERROR' else 'ok' }}">{{ rt.message }}</div>{% endif %}
 
+{% if view_day %}
+<div class="panel">
+  <h2 style="margin-top:0">Trades on {{ view_day.strftime('%d %b %Y') }}</h2>
+  <p class="small">
+    <a href="/strategies/{{ inst.id }}?date={{ prev_day }}">‹ {{ prev_day.strftime('%d %b') }}</a>
+    {% if next_day and next_day < day %} · <a href="/strategies/{{ inst.id }}?date={{ next_day }}">{{ next_day.strftime('%d %b') }} ›</a>{% endif %}
+    · <a href="/strategies/{{ inst.id }}">Today (live)</a>
+    · <a href="/trades?instance_id={{ inst.id }}&amp;day_from={{ view_day }}&amp;day_to={{ view_day }}">open in Trades</a>
+  </p>
+  {% set ds = day_summary %}
+  <p>{{ ds.trades }} closed trade{{ 's' if ds.trades != 1 }} ({{ ds.wins }} won){% if ds.failed %} · {{ ds.failed }} not filled{% endif %}{% if ds.open %} · {{ ds.open }} still open{% endif %}
+    · gross <b class="{{ ds.gross|pnlc }}">{{ ds.gross|money }}</b> · net <b class="{{ ds.net|pnlc }}">{{ ds.net|money }}</b></p>
+  <p class="small muted">Live slots and signals are shown for today only; this is the chosen day's record.</p>
+</div>
+{% else %}
 <div class="panel">
   <h2 style="margin-top:0">Today's slots / signals</h2>
   <div hx-get="/strategies/{{ inst.id }}/slots" hx-trigger="load, every 3s" hx-swap="innerHTML"><span class="muted">loading…</span></div>
+  {% if prev_day %}<p class="small muted" style="margin-bottom:0"><a href="/strategies/{{ inst.id }}?date={{ prev_day }}">‹ earlier days</a></p>{% endif %}
 </div>
+{% endif %}
 
 <div class="grid2">
   <div class="panel"><h2 style="margin-top:0">Parameters</h2>
@@ -32,23 +49,23 @@
 </div>
 
 <div class="panel">
-  <h2 style="margin-top:0">Recent trades</h2>
+  <h2 style="margin-top:0">{{ 'Trades of the day' if view_day else 'Recent trades' }}</h2>
   <table>
-    <thead><tr><th>Trade</th><th>Date</th><th>Slot</th><th>Dir</th><th>Symbol</th><th class="num">Qty</th><th class="num">Entry</th><th class="num">Exit</th><th>Reason</th><th class="num">Gross</th><th class="num">Net</th><th>Status</th></tr></thead>
+    <thead><tr><th>Trade</th><th>{{ 'Time' if view_day else 'Date' }}</th><th>Slot</th><th>Dir</th><th>Symbol</th><th class="num">Qty</th><th class="num">Entry</th><th class="num">Exit</th><th>Reason</th><th class="num">Gross</th><th class="num">Net</th><th>Status</th></tr></thead>
     <tbody>
     {% for t in trades %}
-      <tr><td><a href="/trades/{{ t.trade_ref }}">{{ t.trade_ref }}</a></td><td>{{ t.trade_date }}</td><td>{{ t.slot_id.split('#')[-1] if t.slot_id else '' }}</td>
+      <tr><td><a href="/trades/{{ t.trade_ref }}">{{ t.trade_ref }}</a></td><td>{% if view_day %}{{ (t.entry_time or t.signal_time).strftime('%H:%M:%S') if (t.entry_time or t.signal_time) else '' }}{% if t.exit_time %} → {{ t.exit_time.strftime('%H:%M:%S') }}{% endif %}{% else %}{{ t.trade_date }}{% endif %}</td><td>{{ t.slot_id.split('#')[-1] if t.slot_id else '' }}</td>
         <td>{{ t.direction }}</td><td>{{ t.tradingsymbol }}</td><td class="num">{{ t.quantity }}</td>
         <td class="num">{{ t.entry_price|money }}</td><td class="num">{{ t.exit_price|money }}</td><td>{{ t.exit_reason or '' }}</td>
         <td class="num {{ t.gross_pnl|pnlc }}">{{ t.gross_pnl|money }}</td><td class="num {{ t.net_pnl|pnlc }}">{{ t.net_pnl|money }}</td>
         <td><span class="badge {{ t.status }}">{{ t.status }}</span></td></tr>
-    {% else %}<tr><td colspan="12" class="muted">No trades yet.</td></tr>{% endfor %}
+    {% else %}<tr><td colspan="12" class="muted">{{ 'No trades on this day.' if view_day else 'No trades yet.' }}</td></tr>{% endfor %}
     </tbody>
   </table>
 </div>
 
 <div class="panel">
-  <h2 style="margin-top:0">Recent orders</h2>
+  <h2 style="margin-top:0">{{ 'Orders of the day' if view_day else 'Recent orders' }}</h2>
   <table>
     <thead><tr><th>Time</th><th>Order ID</th><th>Trade</th><th>Purpose</th><th>Side</th><th>Type</th><th>Symbol</th><th class="num">Qty</th><th class="num">Filled</th><th class="num">Avg</th><th class="num">Trigger</th><th>Status</th></tr></thead>
     <tbody>
@@ -58,7 +75,7 @@
         <td>{{ o.side }}</td><td>{{ o.order_type }}</td><td>{{ o.tradingsymbol }}</td><td class="num">{{ o.quantity }}</td>
         <td class="num">{{ o.filled_quantity }}</td><td class="num">{{ o.average_price|money }}</td><td class="num">{{ o.trigger_price|money }}</td>
         <td><span class="badge {{ o.status }}">{{ o.status }}</span>{% if o.status_message %}<div class="small muted">{{ o.status_message }}</div>{% endif %}</td></tr>
-    {% else %}<tr><td colspan="12" class="muted">No orders yet.</td></tr>{% endfor %}
+    {% else %}<tr><td colspan="12" class="muted">{{ 'No orders on this day.' if view_day else 'No orders yet.' }}</td></tr>{% endfor %}
     </tbody>
   </table>
 </div>

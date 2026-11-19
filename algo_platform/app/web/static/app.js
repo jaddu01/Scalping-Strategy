@@ -213,7 +213,7 @@
     // instances
     $("#inst-body").innerHTML = (s.instances || []).map((i) => `<tr>
       <td>${canControl(i.owner_id) ? `<label class="switch"><input type="checkbox" class="inst-toggle" data-id="${i.id}" data-mode="${esc(i.mode)}" data-name="${esc(i.name)}" ${i.enabled ? "checked" : ""}><span></span></label>` : (i.enabled ? "on" : "off")}</td>
-      <td><a href="/strategies/${i.id}">${esc(i.name)}</a>${i.pending_settings ? ' <span class="badge amber" title="new parameters apply from the next slot">pending params</span>' : ""}</td>
+      <td><a href="/strategies/${i.id}${past ? `?date=${encodeURIComponent(viewDay)}` : ""}">${esc(i.name)}</a>${i.pending_settings ? ' <span class="badge amber" title="new parameters apply from the next slot">pending params</span>' : ""}</td>
       <td><span class="badge ${esc(i.status)}">${esc(i.status === "RUNNING" ? "RUNNING" : i.status)}</span> <span class="muted small">${esc(i.message || "")}</span></td>
       <td><span class="badge ${esc(i.mode)}">${esc(i.mode.toUpperCase())}</span></td>
       <td>${esc(i.owner || "-")}</td><td>${esc(i.account)}</td><td class="num">${instPnl(i).trades ?? 0}</td>
