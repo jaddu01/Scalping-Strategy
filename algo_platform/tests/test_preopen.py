@@ -111,3 +111,29 @@ async def test_strategy_gets_no_preopen_ticks_or_candles_but_its_timer_runs(tmp_
         assert candles == [at("09:15")]  # the first candle of the day is 09:15
     finally:
         await env.platform.stop()
+
+
+async def test_last_candle_1525_reaches_the_strategy_after_1530(tmp_path):
+    """The 15:25 candle closes at about 15:30:01, after the session; it is still delivered (it used to be dropped,
+    so the Chandelier / EMA lines missed each day's last candle that the broker history has). Ticks after 15:30
+    are not."""
+    SEEN.clear()
+    env = await build_env(tmp_path, start=at("15:24"), instances=[{"name": "REC", "template": "test_preopen_recorder"}])
+    try:
+        for t, px in ((at("15:24", 30), 25300.0), (at("15:25", 5), 25301.0), (at("15:27"), 25305.0),
+                      (at("15:29", 55), 25302.0)):
+            env.clock.set(t)
+            env.spot(px)
+            await env.settle(2)
+        mark = len(SEEN)
+        env.clock.set(at("15:30", 3))  # no tick: the candle closes by time (about 15:30:01.5)
+        await env.wait_for(lambda: ("candle", at("15:25")) in SEEN, timeout=3)
+        env.clock.set(at("15:31"))
+        env.spot(25400.0)  # after-close price
+        await env.settle(3)
+        after = SEEN[mark:]
+        assert ("candle", at("15:25")) in after
+        assert not any(k == "tick" for k, _ in after) and not any(k == "timer" for k, v in after if v >= at("15:30", 1))
+        assert [v for k, v in SEEN if k == "candle"] == [at("15:20"), at("15:25")]
+    finally:
+        await env.platform.stop()

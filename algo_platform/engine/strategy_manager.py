@@ -259,24 +259,25 @@ class InstanceRuntime:
                 for info in updates:
                     await self.strategy.on_trade_update(info)
                 now = self.now()
-                if self.p.calendar.in_session_window(now):
-                    if self.p.calendar.is_market_open(now):
-                        # ticks and candles from 09:15 only: pre-open prices are not trading prices
-                        ticks, self._ticks = list(self._ticks.values()), {}
-                        for t in ticks:
-                            await self.strategy.on_tick(t)
-                        candles, self._candles = self._candles, []
-                        for inst, c in candles:
-                            await self.strategy.on_candle(inst, c)
-                    else:
-                        self._ticks.clear()
-                        self._candles.clear()
-                    if last_timer is None or (now - last_timer).total_seconds() >= 1.0:
-                        last_timer = now
-                        await self.strategy.on_timer(now)  # timers run from pre-open (warm-up, start checks)
+                cal = self.p.calendar
+                in_session = cal.in_session_window(now)
+                if in_session and cal.is_market_open(now):
+                    # ticks from 09:15 only: pre-open prices are not trading prices
+                    ticks, self._ticks = list(self._ticks.values()), {}
+                    for t in ticks:
+                        await self.strategy.on_tick(t)
                 else:
                     self._ticks.clear()
-                    self._candles.clear()
+                # candles by their own start: every regular-session candle of today, also the 15:25 one that closes
+                # just after 15:30 (it was dropped before, so the Chandelier / EMA lines missed each day's last candle
+                # that the broker history has)
+                candles, self._candles = self._candles, []
+                for inst, c in candles:
+                    if c.start.date() == now.date() and cal.is_market_open(c.start):
+                        await self.strategy.on_candle(inst, c)
+                if in_session and (last_timer is None or (now - last_timer).total_seconds() >= 1.0):
+                    last_timer = now
+                    await self.strategy.on_timer(now)  # timers run from pre-open (warm-up, start checks)
                 if self._market_signature() != self._market_sig:
                     await self._resubscribe_market()
                 self._refresh_status(now)
