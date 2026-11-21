@@ -28,6 +28,22 @@ Long (BUY the ATM CE); short (BUY the ATM PE) is the exact mirror:
  12 management    `breakeven_at_1r`: once spot reaches +1R the stop moves to entry + `breakeven_lock_r` x risk
                   (0 = exactly the entry price; never widened);
                   `partial_lots_at_1r`: optionally sell that many lots at +1R
+Continuation entries (`entry_model` = reversal_continuation, off by default) catch one-way trend days, where the
+price stays in PREMIUM (long) and never sweeps a low. Long (short mirrors):
+  c1 trend + place  bullish trend, the close above the equilibrium but at most `cont_max_stretch_atr` x the trend
+                    timeframe's ATR above it
+  c2 break          an entry candle closes above the latest swing high (the candle before did not) with a body >=
+                    `displacement_atr` x ATR: a break of structure
+  c3 zone           the newest bullish FVG since the impulse's swing low, else the order block (as step 6)
+  c4 entry          the zone is touched, then within `cont_touch_candles` candles a bullish candle closes ABOVE the zone
+  c5 stop           below the impulse's swing low (`cont_stop` = impulse) or the zone bottom (zone), - stop buffer
+  c6 exit           `cont_exit` = trail_15m: no target; the stop follows the latest trend-timeframe swing low (minus the
+                    stop buffer), only tightening; the rest exits at 15:15 · target_2r: the reward-risk target
+                    `cont_breakeven` (off by default) applies the +1R breakeven move to continuation trades too
+  limits            at most `cont_max_per_day` a day, new ones `cont_start`-`cont_end`; one position at a time
+  (51-day NIFTY study, run 23's settings: reversal only +1.25 lakh; + continuation with impulse stop, 15-min trail,
+  no breakeven +3.75 lakh, same drawdown; the gain comes from a few trend days)
+Every setup that expires or is cancelled is logged (SETUP_ENDED) with the reason.
 Platform rules: entries `entry_start`-`entry_end`, one position at a time, the 15:15 hard exit, risk checks, the
 sideways filter (log-only by default).
 """
@@ -56,6 +72,8 @@ SWING_LOOKBACK_MIN = 300  # entry-timeframe swings older than 5 hours are not us
 KEEP_ENTRY_BARS = 1200
 KEEP_TREND_BARS = 400
 WARM_RETRY_FIRST, WARM_RETRY_MAX = 20.0, 300.0
+TRAIL_MIN_STEP = 0.5  # continuation trail: smallest stop move, index points
+WAITING = ("SWEPT", "ARMING", "ZONE", "CARMING", "CZONE")  # an idea not yet entered (CARMING / CZONE: continuation)
 
 
 class SmcSettings(RegimeSettings):
@@ -105,6 +123,26 @@ class SmcSettings(RegimeSettings):
     protective_sl_pct: float = Field(0.0, ge=0, le=95, title="Protective SL-M (% of premium, 0 = off)")
     warmup_trend_candles: int = Field(300, ge=50, le=2000, title="Warm-up candles (trend timeframe)")
     warmup_entry_candles: int = Field(800, ge=100, le=5000, title="Warm-up candles (entry timeframe)")
+    entry_model: Literal["reversal", "reversal_continuation"] = Field(
+        "reversal", title="Entry model",
+        description="reversal: sweep in discount / premium + MSS (the playbook) · reversal_continuation: also "
+                    "trend-continuation entries (break of structure in premium + retrace), for one-way trend days")
+    cont_stop: Literal["impulse", "zone"] = Field(
+        "impulse", title="Continuation stop", description="impulse: below the impulse's swing low · zone: below the "
+                                                          "zone bottom (tighter, stopped out more often)")
+    cont_exit: Literal["trail_15m", "target_2r"] = Field(
+        "trail_15m", title="Continuation exit",
+        description="trail_15m: no target, the stop follows the trend timeframe's swing lows (highs), the rest at 15:15 "
+                    "· target_2r: the Target (× risk) above")
+    cont_breakeven: bool = Field(False, title="Continuation: breakeven at +1R",
+                                 description="Off: continuation trades keep their stop / trail (the move to breakeven "
+                                             "cut trend-day winners in the study)")
+    cont_max_per_day: int = Field(2, ge=1, le=10, title="Continuation trades per day (max)")
+    cont_start: time = Field(time(9, 45), title="Continuation entries from (IST)")
+    cont_end: time = Field(time(14, 30), title="Continuation entries until (IST)")
+    cont_max_stretch_atr: float = Field(3.0, gt=0, le=20, title="Continuation: skip if more than x × trend ATR past the "
+                                                               "equilibrium")
+    cont_touch_candles: int = Field(3, ge=1, le=20, title="Continuation: entry within x candles after the zone touch")
 
     @field_validator("underlying")
     @classmethod
@@ -114,7 +152,7 @@ class SmcSettings(RegimeSettings):
             raise ValueError("underlying is required")
         return v
 
-    @field_serializer("entry_start", "entry_end")
+    @field_serializer("entry_start", "entry_end", "cont_start", "cont_end")
     def _ser_time(self, v: time) -> str:
         return fmt_hm(v)
 
@@ -134,6 +172,8 @@ class SmcSettings(RegimeSettings):
             raise ValueError("lots sold at +1R must be fewer than Lots")
         if self.strike_step == 0 and self.underlying not in STRIKE_STEP:
             raise ValueError(f"no automatic strike step for {self.underlying}: set Strike step")
+        if self.entry_model == "reversal_continuation" and not (self.cont_start < self.cont_end):
+            raise ValueError("continuation entries: the start must be before the end")
         return self
 
     @property
@@ -186,10 +226,15 @@ class Setup:
     result: str | None = None
     entry_time: datetime | None = None
     regime: dict[str, Any] | None = None
+    touch_n: int | None = None  # continuation: the candle that last touched the zone
 
     @property
     def long(self) -> bool:
         return self.side == "CE_BUY"
+
+    @property
+    def continuation(self) -> bool:
+        return self.level_kind == "continuation"
 
     @property
     def slot_id(self) -> str:
@@ -203,7 +248,7 @@ class Setup:
 
     @classmethod
     def from_state(cls, d: dict[str, Any]) -> "Setup":
-        d = dict(d)
+        d = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
         for k in ("sweep_time", "entry_time"):
             d[k] = datetime.fromisoformat(d[k]) if d.get(k) else None
         return cls(**d)
@@ -319,6 +364,12 @@ class SmcPlaybook(Strategy):
             return "bear", hs[1], ls[1]
         return "side", hs[1], ls[1]
 
+    def _end(self, x: Setup, state: str, result: str) -> None:
+        """An idea that will not be traded: kept in the setups table and logged with the reason."""
+        x.state, x.result = state, result
+        self._emit("SETUP_ENDED", f"#{x.no} {x.side}{' continuation' if x.continuation else ''} {state.lower()}: "
+                                  f"{result.replace('_', ' ')}", setup=x.no, state=state, reason=result)
+
     # ---- persistence: a restart keeps today's finished / open setups, never re-enters one that signalled
     def _persist(self) -> None:
         if self.day is None:
@@ -341,7 +392,7 @@ class SmcPlaybook(Strategy):
         for x in self.setups:
             if x.state == "ENTERING":
                 x.state, x.result = "REJECTED", "interrupted_entry"
-            elif x.state in ("SWEPT", "ARMING", "ZONE"):  # candle numbers restart: the idea is rebuilt from scratch
+            elif x.state in WAITING:  # candle numbers restart: the idea is rebuilt from scratch
                 x.state, x.result = "EXPIRED", "app_restarted"
 
     # ---- lifecycle
@@ -398,13 +449,13 @@ class SmcPlaybook(Strategy):
     async def on_timer(self, now: datetime) -> None:
         if self.day != now.date():
             for x in self.setups:
-                if x.state in ("SWEPT", "ARMING", "ZONE"):
-                    x.state, x.result = "EXPIRED", "day_end"
+                if x.state in WAITING:
+                    self._end(x, "EXPIRED", "day_end")
             self.day, self.setups, self._saved = now.date(), [], None
         if now >= combine(now.date(), self.settings.entry_end):
             for x in self.setups:
-                if x.state in ("SWEPT", "ARMING", "ZONE"):
-                    x.state, x.result = "EXPIRED", "entry_window_closed"
+                if x.state in WAITING:
+                    self._end(x, "EXPIRED", "entry_window_closed")
         if self.cold and self.spot is not None and (self._warm_retry_at is None or now >= self._warm_retry_at):
             await self._try_warm_up(now)
         self.maybe_apply_pending()
@@ -444,6 +495,11 @@ class SmcPlaybook(Strategy):
         await self._advance(bar, close_time)
         if self.active is None and close_time < combine(close_time.date(), s.entry_end):
             self._detect_sweep(bar, close_time)
+        if s.entry_model == "reversal_continuation":
+            await self._cont_advance(bar, close_time)
+            if self.active is None:
+                self._cont_detect(bar, close_time)
+        self._cont_trail()
         self._persist()
 
     def _detect_sweep(self, b: Bar, close_time: datetime) -> None:
@@ -533,35 +589,127 @@ class SmcPlaybook(Strategy):
         for x in self.setups:
             if x.state == "SWEPT":
                 if (b.low < x.sweep_px) if x.long else (b.high > x.sweep_px):
-                    x.state, x.result = "CANCELLED", "beyond_sweep"
+                    self._end(x, "CANCELLED", "beyond_sweep")
                 elif b.n - x.sweep_n > window:
-                    x.state, x.result = "EXPIRED", "no_displacement_mss"
+                    self._end(x, "EXPIRED", "no_displacement_mss")
                 elif b.n > x.sweep_n:
                     self._check_confirm(x, b)
                 continue
             if x.state == "ARMING" and x.ready_n is not None and b.n >= x.ready_n:
                 if not self._find_zone(x, b):
-                    x.state, x.result = "EXPIRED", "no_zone"
+                    self._end(x, "EXPIRED", "no_zone")
                     continue
                 x.state = "ZONE"
                 self._emit("ZONE", f"ZONE #{x.no} {x.side} {x.zone_kind} {x.zone_lo:.2f}-{x.zone_hi:.2f}", setup=x.no)
             if x.state == "ZONE":
                 lo, hi = x.zone_lo, x.zone_hi
                 if trend != ("bull" if x.long else "bear"):
-                    x.state, x.result = "CANCELLED", "trend_changed"
+                    self._end(x, "CANCELLED", "trend_changed")
                 elif (b.close < lo) if x.long else (b.close > hi):  # type: ignore[operator]
-                    x.state, x.result = "CANCELLED", "closed_through_zone"
+                    self._end(x, "CANCELLED", "closed_through_zone")
                 elif b.n - (x.ready_n or b.n) >= s.setup_valid_candles:
-                    x.state, x.result = "EXPIRED", "no_retrace"
+                    self._end(x, "EXPIRED", "no_retrace")
                 elif ((b.low <= hi and b.bull and b.close > lo) if x.long  # type: ignore[operator]
                       else (b.high >= lo and b.bear and b.close < hi)):  # type: ignore[operator]
                     if self.active is None:
                         await self._enter(x, b, close_time)
 
+    # ---- continuation entries (trend days: break of structure in premium + retrace)
+    def _cont_today(self, day: date) -> int:
+        return sum(1 for x in self.setups if x.continuation and x.sweep_time.date() == day
+                   and x.state in ("ENTERING", "IN_TRADE", "DONE"))
+
+    def _cont_detect(self, b: Bar, close_time: datetime) -> None:
+        s = self.settings
+        if not (s.cont_start <= close_time.time() <= s.cont_end) or self._cont_today(close_time.date()) >= s.cont_max_per_day:
+            return
+        trend, hi, lo = self.trend()
+        if trend not in ("bull", "bear") or hi is None or lo is None:
+            return
+        long = trend == "bull"
+        if (long and not s.allow_long) or (not long and not s.allow_short):
+            return
+        eq, tatr, atr = (hi + lo) / 2, self.trend_s.atr_value, self.entry.atr_value
+        if not tatr or not atr:
+            return
+        stretch = s.cont_max_stretch_atr * tatr
+        if (not eq < b.close <= eq + stretch) if long else (not eq - stretch <= b.close < eq):
+            return  # continuation only in premium (long) / discount (short), and not too far from the equilibrium
+        if abs(b.close - b.open) < s.displacement_atr * atr or not (b.bull if long else b.bear):
+            return
+        sw = [x for x in self.entry.swings if x[3] == ("H" if long else "L") and x[1] <= b.n - 1]
+        opp = [x for x in self.entry.swings if x[3] == ("L" if long else "H") and x[1] <= b.n - 1]
+        prev = self.entry.get(b.n - 1)
+        if not sw or not opp or prev is None:
+            return
+        lvl = sw[-1][2]
+        if not ((b.close > lvl >= prev.close) if long else (b.close < lvl <= prev.close)):
+            return  # no fresh break of structure on this candle
+        if any(x.continuation and x.ref_swing == lvl and x.sweep_time.date() == b.start.date() for x in self.setups):
+            return
+        x = Setup(no=len(self.setups) + 1, side="CE_BUY" if long else "PE_BUY", sweep_time=b.start, sweep_n=opp[-1][0],
+                  sweep_px=opp[-1][2], level=lvl, level_kind="continuation", ref_swing=lvl, atr=atr, state="CARMING",
+                  disp_n=b.n, mss_n=b.n, ready_n=b.n + 1)
+        self.setups.append(x)
+        self._emit("BOS", f"BOS #{x.no} {x.side} continuation {fmt_hm(b.start)} close={b.close:.2f} broke "
+                          f"{'swing high' if long else 'swing low'} {lvl:.2f}; impulse from {x.sweep_px:.2f}; trend="
+                          f"{trend} eq={eq:.2f}", setup=x.no)
+
+    async def _cont_advance(self, b: Bar, close_time: datetime) -> None:
+        s = self.settings
+        trend = self.trend()[0]
+        for x in self.setups:
+            if not x.continuation:
+                continue
+            if x.state == "CARMING" and x.ready_n is not None and b.n >= x.ready_n:
+                if not self._find_zone(x, b):
+                    self._end(x, "EXPIRED", "no_zone")
+                    continue
+                x.state = "CZONE"
+                self._emit("ZONE", f"ZONE #{x.no} {x.side} continuation {x.zone_kind} {x.zone_lo:.2f}-{x.zone_hi:.2f}",
+                           setup=x.no)
+            if x.state != "CZONE":
+                continue
+            lo, hi = x.zone_lo, x.zone_hi
+            if trend != ("bull" if x.long else "bear"):
+                self._end(x, "CANCELLED", "trend_changed")
+            elif (b.close < lo) if x.long else (b.close > hi):  # type: ignore[operator]
+                self._end(x, "CANCELLED", "closed_through_zone")
+            elif b.n - (x.ready_n or b.n) >= s.setup_valid_candles:
+                self._end(x, "EXPIRED", "no_retrace")
+            else:
+                if (b.low <= hi) if x.long else (b.high >= lo):  # type: ignore[operator]
+                    x.touch_n = b.n
+                if (x.touch_n is not None and b.n - x.touch_n <= s.cont_touch_candles
+                        and ((b.bull and b.close > hi) if x.long else (b.bear and b.close < lo))  # type: ignore[operator]
+                        and self.active is None):
+                    if s.cont_stop == "zone":
+                        x.sweep_px = lo if x.long else hi  # type: ignore[assignment]
+                    x.state = "ZONE"
+                    await self._enter(x, b, close_time)
+
+    def _cont_trail(self) -> None:
+        """Continuation trade, trail_15m exit: the stop follows the latest trend-timeframe swing low (high) minus the
+        stop buffer; it only tightens (the engine refuses anything else too)."""
+        s, a = self.settings, self.active
+        if a is None or not a.continuation or a.state != "IN_TRADE" or not a.trade_id or s.cont_exit != "trail_15m":
+            return
+        sw = [x for x in self.trend_s.swings if x[3] == ("L" if a.long else "H")]
+        atr = self.entry.atr_value or a.atr
+        if not sw or a.stop is None:
+            return
+        cand = round(sw[-1][2] - s.stop_buffer_atr * atr if a.long else sw[-1][2] + s.stop_buffer_atr * atr, 2)
+        # move only when it tightens by at least half a point (not every minute as the ATR in the buffer drifts)
+        if (cand >= a.stop + TRAIL_MIN_STEP) if a.long else (cand <= a.stop - TRAIL_MIN_STEP):
+            old, a.stop = a.stop, cand
+            self.ctx.tighten_stop(a.trade_id, cand)
+            self._emit("TRAIL", f"#{a.no} continuation stop {old:.2f} -> {cand:.2f} ({s.trend_timeframe_min}m swing "
+                                f"{sw[-1][2]:.2f})", setup=a.no, old=old, new=cand)
+
     async def _enter(self, x: Setup, b: Bar, close_time: datetime) -> None:
         s = self.settings
         if not (combine(close_time.date(), s.entry_start) <= close_time <= combine(close_time.date(), s.entry_end)):
-            x.state, x.result = "EXPIRED", "outside_entry_window"
+            self._end(x, "EXPIRED", "outside_entry_window")
             return
         spot = self.ctx.ltp(self.spot) or b.close
         atr = x.atr
@@ -599,6 +747,9 @@ class SmcPlaybook(Strategy):
         d = Direction(x.side)
         side = "above" if x.long else "below"
         partial = ([PartialTarget("1R", x.one_r, side, s.partial_lots_at_1r)] if s.partial_lots_at_1r else [])
+        trailed = x.continuation and s.cont_exit == "trail_15m"
+        if trailed:
+            x.target = None  # no target: the trend timeframe's swings trail the stop
         signal = EntrySignal(
             slot_id=x.slot_id, direction=d,
             option=InstrumentKey(underlying=s.underlying, exchange=opt_exch,
@@ -614,9 +765,11 @@ class SmcPlaybook(Strategy):
                   "swept_kind": x.level_kind, "zone": f"{x.zone_kind} {x.zone_lo}-{x.zone_hi}", "risk_pts": round(risk, 2),
                   "risk_atr": round(risk / atr, 2), "target": x.target, "regime_entry": x.regime},
         )
-        self._emit("SETUP", f"ENTRY #{x.no} {x.side} {x.zone_kind} {x.zone_lo:.2f}-{x.zone_hi:.2f} spot={spot:.2f} "
-                            f"SL={stop:.2f} ({risk:.1f} pts, {risk / atr:.1f} ATR) target={x.target:.2f} "
-                            f"+1R={x.one_r:.2f}" + (f" regime={x.regime['note']}" if x.regime else ""), setup=x.no)
+        self._emit("SETUP", f"ENTRY #{x.no} {x.side}{' continuation' if x.continuation else ''} {x.zone_kind} "
+                            f"{x.zone_lo:.2f}-{x.zone_hi:.2f} spot={spot:.2f} SL={stop:.2f} ({risk:.1f} pts, "
+                            f"{risk / atr:.1f} ATR) " + (f"target={x.target:.2f}" if x.target is not None else
+                                                         f"no target (trailed on {s.trend_timeframe_min}m swings)")
+                   + f" +1R={x.one_r:.2f}" + (f" regime={x.regime['note']}" if x.regime else ""), setup=x.no)
         info = await self.ctx.submit_entry(signal)
         if info is None:
             x.state, x.result = "REJECTED", "signal_rejected"
@@ -626,8 +779,8 @@ class SmcPlaybook(Strategy):
             if info.status != "OPEN":
                 x.result = info.exit_reason or "entry_failed"
             for o in self.setups:  # one position at a time: the other ideas are dropped
-                if o is not x and o.state in ("SWEPT", "ARMING", "ZONE"):
-                    o.state, o.result = "CANCELLED", "position_taken"
+                if o is not x and o.state in WAITING:
+                    self._end(o, "CANCELLED", "position_taken")
         self._persist()
 
     # ---- ticks: breakeven at +1R
@@ -636,6 +789,8 @@ class SmcPlaybook(Strategy):
             return
         a = self.active
         if a is None or a.state != "IN_TRADE" or not a.trade_id or a.be_moved or not self.settings.breakeven_at_1r:
+            return
+        if a.continuation and not self.settings.cont_breakeven:
             return
         if a.one_r is None or a.entry_spot is None:
             return
@@ -661,7 +816,7 @@ class SmcPlaybook(Strategy):
 
     # ---- settings / UI
     def is_idle(self) -> bool:
-        return self.active is None and not any(x.state in ("ARMING", "ZONE") for x in self.setups)
+        return self.active is None and not any(x.state in ("ARMING", "ZONE", "CARMING", "CZONE") for x in self.setups)
 
     def apply_settings(self, new: StrategySettings) -> None:
         assert isinstance(new, SmcSettings)
@@ -674,7 +829,7 @@ class SmcPlaybook(Strategy):
     def phase(self) -> str:
         if self.active is not None:
             return "IN_TRADE"
-        return "WATCHING" if any(x.state in ("SWEPT", "ARMING", "ZONE") for x in self.setups) else "WAITING"
+        return "WATCHING" if any(x.state in WAITING for x in self.setups) else "WAITING"
 
     def status(self) -> dict[str, Any]:
         t, hi, lo = self.trend()
