@@ -14,6 +14,7 @@ Exits (spot levels, watched on every tick by the engine):
   TP4 / TP5  optional (0 lots = off): with lots set, TP3 (and TP4) sell their lots and the LAST TP that has lots
              closes the remaining lots (e.g. 3/2/2/2/1 at 2/3/4/5/6 R)
   optional   stop to the entry price once TP1 is reached (`move_sl_to_entry_after_tp1`)
+  risk filter skip the signal when R < `min_risk_points` or R > `max_risk_points` (0 = off; only with the stop on)
   opposite   an opposite signal closes what is left and opens the new direction once flat (`exit_on_opposite`)
   hard exit  the 15:15 square-off
 Switches (both on = the Multi-TP script; both off = the original Chandelier_Exit.pine, stop-and-reverse):
@@ -87,6 +88,12 @@ class ChandelierSettings(RegimeSettings):
     # --- Pine "Stop Loss"
     sl_buffer_points: float = Field(0.0, ge=0, le=500, title="SL buffer beyond the previous candle (points)")
     move_sl_to_entry_after_tp1: bool = Field(False, title="Move SL to entry after TP1 is hit")
+    min_risk_points: float = Field(0.0, ge=0, le=1000, title="Skip if risk below (points, 0 = off)",
+                                   description="Risk R = entry to SL in spot points; a tiny R puts the SL and TP1 "
+                                               "inside the noise")
+    max_risk_points: float = Field(0.0, ge=0, le=1000, title="Skip if risk above (points, 0 = off)",
+                                   description="A wide SL loses the most and rarely reaches the TPs (53-day NIFTY "
+                                               "study: skipping R > 50 lifted net and halved the drawdown)")
     exit_on_opposite: bool = Field(True, title="Close remaining lots on the opposite signal",
                                    description="…and take the new direction as soon as the exit has filled")
     # --- platform rules
@@ -134,6 +141,8 @@ class ChandelierSettings(RegimeSettings):
                 prev = (name, rr)
         if self.lots <= 0:
             raise ValueError("TP1 + TP2 + TP3 (+ TP4 + TP5) lots must be more than 0")
+        if self.min_risk_points and self.max_risk_points and self.min_risk_points >= self.max_risk_points:
+            raise ValueError("risk filter: 'skip if risk below' must be less than 'skip if risk above'")
         if not (self.allow_long or self.allow_short):
             raise ValueError("allow long trades, short trades, or both")
         if not (MARKET_OPEN <= self.entry_start < self.entry_end <= MARKET_CLOSE):
@@ -445,6 +454,15 @@ class ChandelierExit(Strategy):
             reason = "outside_entry_window"
         elif risk <= 0 and (s.use_stop_loss or s.use_targets):
             reason = "no_risk"  # the close is beyond the previous candle's extreme (as the script skips)
+        elif s.use_stop_loss and s.min_risk_points and risk < s.min_risk_points:
+            reason = "risk_below_min"
+        elif s.use_stop_loss and s.max_risk_points and risk > s.max_risk_points:
+            reason = "risk_above_max"
+        if reason in ("risk_below_min", "risk_above_max"):
+            lim = s.min_risk_points if reason == "risk_below_min" else s.max_risk_points
+            self._emit("RISK_SKIPPED", f"#{x.no} {x.side} skipped: risk {risk:.2f} pts is "
+                                       f"{'below' if reason == 'risk_below_min' else 'above'} {lim:g}",
+                       Level.WARNING, setup=x.no)
         if reason:
             x.state, x.result = "SKIPPED", reason
             return None
