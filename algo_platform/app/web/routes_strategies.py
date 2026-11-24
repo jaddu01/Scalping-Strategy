@@ -443,7 +443,8 @@ async def instance_slots(iid: int, request: Request, user: SessionInfo = Depends
             data = {ref: {"direction": t.direction, "signal_spot": t.signal_spot, "quantity": t.quantity,
                           "lot_size": t.lot_size, "entry_price": t.entry_price, "exit_price": t.exit_price,
                           "exit_trigger_spot": t.exit_trigger_spot, "gross_pnl": t.gross_pnl, "net_pnl": t.net_pnl,
-                          "status": t.status, "exit_time": t.exit_time, "partials": (t.meta or {}).get("partials")}
+                          "status": t.status, "exit_time": t.exit_time, "partials": (t.meta or {}).get("partials"),
+                          "spot_sl": t.spot_sl, "spot_sl_side": t.spot_sl_side, "exit_reason": t.exit_reason}
                     for ref, t in rows.items()}
         live_by_ref = {lt.ref: lt for lt in list(p.trades.live.values())} if p else {}
         for ref, tr in data.items():
@@ -451,7 +452,8 @@ async def instance_slots(iid: int, request: Request, user: SessionInfo = Depends
             live = None
             if lt is not None:
                 live = {"spot": p.market.ltp(lt.spot_key) if lt.spot_key else None,
-                        "premium": p.market.ltp(lt.option_series), "open_qty": lt.open_qty}
+                        "premium": p.market.ltp(lt.option_series), "open_qty": lt.open_qty,
+                        "spot_sl": lt.spot_sl, "spot_sl_side": lt.spot_sl_side}
                 tr = {**tr, "partials": lt.partials, "status": lt.status}
             v = slot_trade_view(tr, live)
             views[ref] = v

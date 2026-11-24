@@ -3,12 +3,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.spot_sl import points_in_favour as _pts
+from core.spot_sl import sl_view
 
-def _pts(direction: str | None, entry: float | None, exit_: float | None) -> float | None:
-    """Points in the trade's favour: CE = exit − entry, PE = entry − exit."""
-    if entry is None or exit_ is None or direction not in ("CE_BUY", "PE_BUY"):
-        return None
-    return round((exit_ - entry) if direction == "CE_BUY" else (entry - exit_), 2)
+SL_REASONS = ("spot_stop_loss", "trailing_stop", "protective_sl")
 
 
 def slot_trade_view(trade: dict[str, Any] | None, live: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -49,7 +47,12 @@ def slot_trade_view(trade: dict[str, Any] | None, live: dict[str, Any] | None = 
                   if all(p is not None for p, _ in known) else None)
     else:
         points = final_pts
-    return {"entry_spot": entry_spot, "exit_spot": exit_spot, "points": points, "legs": legs,
+    live_now = bool(is_open and live)
+    src = {**trade, **{k: v for k, v in (live or {}).items() if k.startswith("spot_sl")}} if live_now else trade
+    # the live trade's stop (a trailed stop has moved); distance only while the trade is open
+    sl = sl_view(d, entry_spot, src.get("spot_sl"), src.get("spot_sl_side"), exit_spot if live_now else None)
+    sl["sl_hit"] = (not is_open) and trade.get("exit_reason") in SL_REASONS
+    return {**sl, "entry_spot": entry_spot, "exit_spot": exit_spot, "points": points, "legs": legs,
             "entry_premium": entry_prem, "exit_premium": exit_prem, "pnl": round(pnl, 2) if pnl is not None else None,
-            "net": net, "live": bool(is_open and live), "exit_time": trade.get("exit_time"),
+            "net": net, "live": live_now, "exit_time": trade.get("exit_time"),
             "status": trade.get("status")}

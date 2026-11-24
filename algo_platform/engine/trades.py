@@ -17,6 +17,7 @@ from brokers.instruments import round_to_tick
 from core.clock import Clock, combine, fmt_hm, format_duration, hm_or_hms
 from core.events import Category, EventBus, Level
 from core.settings_schema import GlobalSettings
+from core.spot_sl import sl_view
 from engine.accounts import AccountRuntime, BrokerSync, make_tag, parse_tag
 from engine.charges import option_charges
 from engine.exit_manager import (ExitManager, ExitState, RunnerState, band_pct, runner_from_plan,
@@ -83,6 +84,7 @@ class LiveTrade:
     partial_busy: bool = False  # a partial exit order is in flight (position check must wait)
     sl_reason: str = "spot_stop_loss"  # "trailing_stop" once the strategy has moved the stop
     runner: RunnerState | None = None  # runner protection floor (TP strategies); shared with the ExitState
+    entry_spot: float | None = None  # index spot at the entry signal (UI: SL risk / points running)
 
     @property
     def option_series(self) -> str:
@@ -321,7 +323,7 @@ class TradeManager:
             tp_premium_level=round(entry_price * (1 + plan.tp_premium_pct / 100), 2) if plan.tp_premium_pct else None,
             protective_pct=plan.protective_sl_pct,
             partials=[_partial_plan(p, inst.lot_size, entry_price, inst.tick_size) for p in plan.partial_targets],
-            runner=runner_from_plan(plan.runner, entry_price, inst.tick_size))
+            runner=runner_from_plan(plan.runner, entry_price, inst.tick_size), entry_spot=signal.spot)
         self.live[trade_id] = lt
         if lt.partials:
             self._save_meta(lt, partials=lt.partials)  # premium targets now have their level
@@ -1184,7 +1186,8 @@ class TradeManager:
             sl_reason="trailing_stop" if meta.get("trailed") else "spot_stop_loss",
             runner=(RunnerState.from_dict(meta.get("runner"))
                     or runner_from_plan(meta.get("runner_plan"), row.entry_price or 0.0,
-                                        float(meta.get("tick_size", 0.05)))))
+                                        float(meta.get("tick_size", 0.05)))),
+            entry_spot=row.signal_spot)
 
     def today_trade_infos(self, instance_id: int) -> list[TradeInfo]:
         today = self.clock.now().date()
@@ -1252,9 +1255,8 @@ class TradeManager:
             spot = self.market.ltp(lt.spot_key) if lt.spot_key else None
             ltp = self.market.ltp(lt.option_series)
             unreal = round((ltp - lt.entry_price) * lt.open_qty, 2) if ltp is not None else None
-            sl_dist = None
-            if spot is not None and lt.spot_sl is not None:
-                sl_dist = round(spot - lt.spot_sl if lt.spot_sl_side == "below" else lt.spot_sl - spot, 2)
+            slv = sl_view(lt.direction, lt.entry_spot, lt.spot_sl, lt.spot_sl_side, spot)
+            sl_dist = slv.get("sl_left")
             tp_dist = None
             if lt.tp_spot_level is not None and spot is not None:
                 tp_dist = round(lt.tp_spot_level - spot if lt.tp_spot_side == "above" else spot - lt.tp_spot_level, 2)
@@ -1278,6 +1280,8 @@ class TradeManager:
                 "entry_price": lt.entry_price, "ltp": ltp, "unrealized": unreal, "booked": round(booked, 2),
                 "net_estimate": round(unreal + booked - charges, 2) if unreal is not None else None,
                 "spot": spot, "spot_sl": lt.spot_sl, "spot_sl_side": lt.spot_sl_side, "sl_distance": sl_dist,
+                "entry_spot": lt.entry_spot, "sl_risk": slv.get("sl_risk"), "sl_left_pct": slv.get("sl_left_pct"),
+                "points_running": slv.get("running"),
                 "protective_sl_order_id": lt.protective_sl_order_id, "protective_sl_trigger": lt.protective_sl_trigger,
                 "protective_sl_status": lt.protective_sl_status,
                 "tp_level": lt.tp_spot_level if lt.tp_spot_level is not None else lt.tp_premium_level,

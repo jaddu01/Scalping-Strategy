@@ -199,6 +199,18 @@
     const accs = (s.accounts || []).map((a) => `<span title="${esc(a.label)}: ${esc(a.status)}${a.is_feed ? " (data feed)" : ""}&#10;last tick: ${esc(a.last_tick_at ? ago(a.last_tick_at) : "–")}&#10;order sync: ${esc(ago(a.last_order_sync_at))}"><span class="dot ${esc(a.indicator)}"></span> ${esc(a.label)}${a.is_feed ? " ⦿" : ""}</span>`).join("");
     el.innerHTML = accs + `<span class="muted">${s.market_open ? "market open" : s.trading_day ? "market closed" : "no trading today"} · ${hms(s.now)}</span>`;
   }
+  // points left to the spot SL, % of the entry risk left (red ≤ 25 % or ≤ 10 pts, amber ≤ 50 %), points running
+  function slDist(p) {
+    if (p.sl_distance === null || p.sl_distance === undefined) return "–";
+    const pct = p.sl_left_pct ?? 100;
+    const cls = pct <= 25 || p.sl_distance <= 10 ? "neg" : pct <= 50 ? "warn" : "pos";
+    const w = Math.max(0, Math.min(100, pct));
+    return `<span class="${cls}" title="NIFTY points from the spot to the SL${p.sl_risk ? ` · risk at entry ${num(p.sl_risk)} pts` : ""}">` +
+      (p.sl_distance <= 0 ? "<b>at SL</b>" : `<b>${num(p.sl_distance)}</b> pts${p.sl_left_pct !== null && p.sl_left_pct !== undefined ? ` · ${p.sl_left_pct}%` : ""}`) +
+      `<span class="sl-bar"><i style="width:${w}%"></i></span></span>` +
+      (p.points_running !== null && p.points_running !== undefined
+        ? `<div class="small ${pc(p.points_running)}">running ${p.points_running > 0 ? "+" : ""}${num(p.points_running)}</div>` : "");
+  }
   function renderDashboard(s) {
     const root = $("#dashboard"); if (!root) return;
     const past = viewDay !== null;
@@ -228,7 +240,7 @@
       <td class="num ${pc(p.unrealized)}"><b>${num(p.unrealized)}</b><div class="muted small">net≈ ${num(p.net_estimate)}</div></td>
       <td class="num">${num(p.broker_pnl)}${p.mismatch ? `<div class="mismatch" title="platform vs broker differ">⚠ diff ${num(p.pnl_diff)}</div>` : ""}</td>
       <td class="num">${num(p.spot)}<div class="muted small">SL ${num(p.spot_sl)} (${esc(p.spot_sl_side === "below" ? "≤" : "≥")})</div></td>
-      <td class="num ${p.sl_distance !== null && p.sl_distance < 10 ? "neg" : ""}">${num(p.sl_distance)}</td>
+      <td class="num">${slDist(p)}</td>
       <td class="small">${p.protective_sl_order_id ? `${esc(p.protective_sl_order_id)}<br>trg ${num(p.protective_sl_trigger)} <span class="badge ${esc(p.protective_sl_status)}">${esc(p.protective_sl_status)}</span>` : '<span class="neg">none</span>'}</td>
       <td class="num small">${p.tp_level !== null && p.tp_level !== undefined ? `${num(p.tp_level)} (${esc(p.tp_kind)})<br>dist ${num(p.tp_distance)}` : "–"}${p.runner ? `<div class="muted small">${esc(p.runner)}</div>` : ""}</td>
       <td class="num countdown" data-secs="${p.seconds_to_exit}">${mmss(p.seconds_to_exit)}</td>
@@ -245,6 +257,11 @@
   function applyState(s) {
     lastState = s; stateAt = Date.now();
     renderBanners(s); renderConn(s); renderDashboard(s); labelTables($("#dashboard") || document);
+    // any page: <span data-sl-live="T000123"> shows that open trade's live distance to its SL
+    $$("[data-sl-live]").forEach((el) => {
+      const p = (s.positions || []).find((x) => x.trade_ref === el.dataset.slLive);
+      el.innerHTML = p ? slDist(p) : "";
+    });
     document.dispatchEvent(new CustomEvent("algo:state", { detail: s }));
   }
   // countdowns tick locally between server updates

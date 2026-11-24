@@ -32,7 +32,8 @@
       <div class="muted mono">{% for k, v in (rg.metrics or {}).items() %}{{ k }}={{ v }}{{ ' · ' if not loop.last }}{% endfor %}</div></td></tr>
     {% endif %}{% endfor %}
     <tr><th>Signal</th><td>{{ t.signal_time|dt }} · spot {{ t.signal_spot|money }} · trigger {{ t.signal_trigger|money }} · premium {{ t.signal_premium|money }}</td></tr>
-    <tr><th>Spot SL</th><td>{{ t.spot_sl|money }} ({{ 'exit if spot ≤' if t.spot_sl_side == 'below' else 'exit if spot ≥' }})</td></tr>
+    <tr><th>Spot SL</th><td>{{ t.spot_sl|money }} ({{ 'exit if spot ≤' if t.spot_sl_side == 'below' else 'exit if spot ≥' }}){% if t.spot_sl is not none and t.signal_spot is not none %} · risk {{ '%.2f'|format((t.signal_spot - t.spot_sl)|abs) }} pts{% endif %}
+      {% if t.status in ('OPEN', 'EXITING') %}<div data-sl-live="{{ t.trade_ref }}" class="small"></div>{% endif %}</td></tr>
     <tr><th>Take-profit</th><td>{{ t.tp_spot_level|money if t.tp_spot_level else (t.tp_premium_level|money ~ ' premium' if t.tp_premium_level else '–') }}</td></tr>
     <tr><th>Hard exit</th><td>{{ t.exit_at|dt('%H:%M') }}</td></tr>
     <tr><th>Protective SL</th><td>{{ t.protective_sl_order_id or '–' }} · trigger {{ t.protective_sl_trigger|money }} · {{ t.protective_sl_status or '' }}</td></tr>

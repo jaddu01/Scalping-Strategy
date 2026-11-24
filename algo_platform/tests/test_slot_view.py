@@ -67,3 +67,51 @@ def test_slots_partial_renders():
     assert "102.40 → 104.10" in html and "552.50" in html
     assert "TP1 2 lots @ spot 120.00 (+20.00 pts), premium 60.00" in html
     assert "Today: 2 trades" in html and "no_breakout" in html
+
+
+def test_sl_view_points_left_and_percent():
+    from core.spot_sl import sl_view
+
+    # 23-Nov slot 1: PE at spot 25644.40, SL 25694.70 (above) -> risk 50.30
+    v = sl_view("PE_BUY", 25644.40, 25694.70, "above", 25669.55)
+    assert (v["sl_risk"], v["sl_left"], v["sl_left_pct"], v["running"]) == (50.3, 25.15, 50, -25.15)
+    assert sl_view("PE_BUY", 25644.40, 25694.70, "above", 25695.55)["sl_left"] == -0.85  # through the SL
+    ce = sl_view("CE_BUY", 25324.30, 25297.20, "below", 25350.0)  # in profit: more than 100 % of the risk left
+    assert (ce["sl_left"], ce["sl_left_pct"], ce["running"]) == (52.8, 195, 25.7)
+    assert sl_view("CE_BUY", 100.0, 90.0, None, None) == {"sl": 90.0, "sl_side": "below", "sl_risk": 10.0,
+                                                          "sl_left": None, "sl_left_pct": None, "running": None}
+    assert sl_view("CE_BUY", 100.0, None, "below", 95.0) == {"sl": None}
+
+
+def test_slot_view_sl_live_closed_and_trailed():
+    base = {"direction": "PE_BUY", "signal_spot": 25443.75, "quantity": 650, "lot_size": 65, "entry_price": 50.45,
+            "spot_sl": 25468.20, "spot_sl_side": "above"}
+    live = slot_trade_view({**base, "status": "OPEN"}, {"spot": 25460.0, "premium": 42.0, "open_qty": 650})
+    assert live["live"] and live["sl_left"] == 8.2 and live["sl_left_pct"] == 34 and live["running"] == -16.25
+    trailed = slot_trade_view({**base, "status": "OPEN"}, {"spot": 25430.0, "premium": 60.0, "open_qty": 650,
+                                                          "spot_sl": 25450.0, "spot_sl_side": "above"})
+    assert trailed["sl"] == 25450.0 and trailed["sl_left"] == 20.0  # the live (moved) stop wins over the stored one
+    closed = slot_trade_view({**base, "status": "CLOSED", "exit_reason": "spot_stop_loss",
+                              "exit_trigger_spot": 25470.0, "gross_pnl": -8872.5})
+    assert closed["sl_hit"] and closed["sl_left"] is None and closed["sl_risk"] == 24.45
+    assert not slot_trade_view({**base, "status": "CLOSED", "exit_reason": "timed_exit"})["sl_hit"]
+
+
+def test_slots_partial_shows_sl_left():
+    from app.web.render import templates
+
+    slot = {"no": 2, "ref_start": "13:30", "ref_end": "13:35", "entry_end": "15:15", "exit_at": "15:15",
+            "state": "IN_TRADE", "ref_high": 25468.20, "ref_low": 25446.95, "long_trigger": 25470.45,
+            "short_trigger": 25444.70, "direction": "PE_BUY", "trade_id": "T000952"}
+    done = {**slot, "no": 1, "state": "DONE", "trade_id": "T000900", "result": "spot_stop_loss"}
+    base = {"direction": "PE_BUY", "quantity": 650, "lot_size": 65, "spot_sl_side": "above"}
+    views = {"T000952": slot_trade_view({**base, "signal_spot": 25443.75, "entry_price": 50.45, "spot_sl": 25468.20,
+                                         "status": "OPEN"}, {"spot": 25460.0, "premium": 42.0, "open_qty": 650}),
+             "T000900": slot_trade_view({**base, "signal_spot": 25644.40, "entry_price": 109.55, "spot_sl": 25694.70,
+                                         "status": "CLOSED", "exit_reason": "spot_stop_loss",
+                                         "exit_trigger_spot": 25695.55, "gross_pnl": -16217.5})}
+    html = templates.get_template("partials/slots.html").render(
+        rt={"strategy": {"slots": [done, slot]}}, views=views, totals={"points": 0, "pnl": 0, "trades": 2})
+    assert ">SL</th>" in html and "25,468.20" in html
+    assert "<b>8.20</b> pts left · 34%" in html and "running -16.25" in html and 'class="small nowrap neg"' in html
+    assert '<span class="badge red">hit</span>' in html  # the closed slot-1 trade

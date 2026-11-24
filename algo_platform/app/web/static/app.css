@@ -21,7 +21,9 @@ h3 { font-size: 14px; margin: 14px 0 8px; color: var(--muted); text-transform: u
 code, .mono { font-family: var(--mono); font-size: 12.5px; }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
-.pos { color: var(--pos); } .neg { color: var(--neg); }
+.pos { color: var(--pos); } .neg { color: var(--neg); } .warn { color: var(--warn); }
+.sl-bar { display: block; height: 3px; margin-top: 2px; border-radius: 2px; background: rgba(107, 119, 133, .3); min-width: 60px; }
+.sl-bar > i { display: block; height: 100%; border-radius: 2px; background: currentColor; }
 .right { text-align: right; } .nowrap { white-space: nowrap; }
 .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .spacer { flex: 1; }
