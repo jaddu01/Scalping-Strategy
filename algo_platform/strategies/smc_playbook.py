@@ -399,7 +399,7 @@ class SmcPlaybook(Strategy):
     async def on_start(self) -> None:
         self.spot = self.ctx.resolve(self.spot_key)
         now = self.ctx.now()
-        self.day = now.date()
+        self.day = self.display_day(now.date())  # a weekend / holiday shows the last trading day
         self._load(self.day)
         await self._try_warm_up(now, first=True)
 

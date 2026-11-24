@@ -248,7 +248,7 @@ class InstanceRuntime:
                 return
             if not await self._start_strategy():
                 return
-            self.strategy.restore(self.p.trades.today_trade_infos(self.instance_id))
+            self.strategy.restore(self.p.trades.today_trade_infos(self.instance_id, getattr(self.strategy, "day", None)))
             self.emit("INSTANCE_STARTED", f"started in {self.mode.upper()} mode",
                       params=self.strategy.settings.model_dump(mode="json"))
             last_timer: datetime | None = None
@@ -340,7 +340,7 @@ class InstanceRuntime:
         await self._unsubscribe_market()
         await self._subscribe_market()
         await self.strategy.on_start()
-        self.strategy.restore(self.p.trades.today_trade_infos(self.instance_id))
+        self.strategy.restore(self.p.trades.today_trade_infos(self.instance_id, getattr(self.strategy, "day", None)))
         new = ", ".join(k.label() for k in self._subscribed) or "-"
         self.emit("INSTRUMENTS_CHANGED", f"market data switched: {old} -> {new}; today's schedule rebuilt",
                   Level.WARNING, old=old, new=new)

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass, field
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from enum import Enum
 from typing import Any, ClassVar, Protocol
 
@@ -199,6 +199,19 @@ class Strategy(abc.ABC):
 
     def restore(self, trades: list[TradeInfo]) -> None:
         """Rebuild today's state after a restart from the trades already stored."""
+
+    def display_day(self, today: date) -> date:
+        """The day whose saved slots / signals to load at start: today, or on a weekend / holiday the last
+        trading day (display only: the timer and candles only run in a session, which opens a new day)."""
+        is_trading = getattr(self.ctx, "is_trading_day", None)  # contexts written before this method
+        if is_trading is None:
+            return today
+        d = today
+        for _ in range(15):
+            if is_trading(d):
+                return d
+            d -= timedelta(days=1)
+        return today
 
     # ---- settings
     def is_idle(self) -> bool:

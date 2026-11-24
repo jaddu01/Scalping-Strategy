@@ -1189,8 +1189,9 @@ class TradeManager:
                                         float(meta.get("tick_size", 0.05)))),
             entry_spot=row.signal_spot)
 
-    def today_trade_infos(self, instance_id: int) -> list[TradeInfo]:
-        today = self.clock.now().date()
+    def today_trade_infos(self, instance_id: int, day: date | None = None) -> list[TradeInfo]:
+        """The instance's stored trades of `day` (default today) for Strategy.restore()."""
+        today = day or self.clock.now().date()
         with self.db.session() as s:
             rows = list(s.scalars(select(Trade).where(Trade.instance_id == instance_id, Trade.trade_date == today)))
         out = []
