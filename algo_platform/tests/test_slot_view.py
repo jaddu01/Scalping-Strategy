@@ -115,3 +115,19 @@ def test_slots_partial_shows_sl_left():
     assert ">SL</th>" in html and "25,468.20" in html
     assert "<b>8.20</b> pts left · 34%" in html and "running -16.25" in html and 'class="small nowrap neg"' in html
     assert '<span class="badge red">hit</span>' in html  # the closed slot-1 trade
+
+
+def test_closed_day_note_and_reason():
+    from datetime import date
+
+    from app.web.render import templates
+    from core.settings_schema import GlobalSettings
+    from engine.calendar import MarketCalendar
+
+    cal = MarketCalendar(GlobalSettings(), {date(2026, 11, 24): "", date(2026, 11, 25): "Guru Nanak Jayanti"})
+    assert cal.closed_reason(date(2026, 11, 24)) == "holiday"  # unnamed holiday: no longer "weekend"
+    assert cal.closed_reason(date(2026, 11, 25)) == "Guru Nanak Jayanti"
+    assert cal.closed_reason(date(2026, 11, 28)) == "weekend"
+    html = templates.get_template("partials/slots.html").render(
+        rt=None, views={}, totals={}, closed={"reason": "holiday", "day": date(2026, 11, 23)})
+    assert "No trading today (holiday). Showing the last trading day, <b>Mon 23 Nov</b>." in html

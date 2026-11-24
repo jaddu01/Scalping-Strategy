@@ -32,6 +32,12 @@ class MarketCalendar:
     def holiday_name(self, d: date) -> str | None:
         return self.holidays.get(d)
 
+    def closed_reason(self, d: date) -> str:
+        """Why `d` has no trading: the holiday's name, "holiday" (unnamed) or "weekend"."""
+        if d in self.holidays:
+            return self.holidays[d] or "holiday"
+        return "weekend"
+
     def at(self, d: date, t: time) -> datetime:
         return combine(d, t)
 

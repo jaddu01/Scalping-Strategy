@@ -132,3 +132,25 @@ async def test_slot_finished_while_app_was_off_shows_reference_but_never_trades(
     # and it is remembered for the next restart
     s2 = (await restart(ctx, "10:04")).slots[0]
     assert s2.state is SlotState.MISSED and s2.ref.high == hi
+
+
+async def test_restart_on_holiday_shows_last_trading_day():
+    """24-Nov: the app restarted on a market holiday and the slots page showed every slot of the (holiday) day as
+    MISSED / started_after_slot. On a non-trading day the last trading day's saved slots are shown instead."""
+    from datetime import timedelta
+
+    ctx = FakeStrategyContext(start=at("09:40"))
+    strat = await start(ctx)
+    await open_first_window(ctx, strat)
+    ctx.clock.set(at("09:59", 58))
+    await strat.on_timer(ctx.now())
+    day = ctx.now().date()
+    ctx.holidays = {day + timedelta(days=1)}
+    ctx.clock.set(at("20:50") + timedelta(days=1))  # the next day is a holiday
+    ctx.candles.clear()
+    s = await start(ctx)
+    assert s.day == day  # not the holiday
+    assert s.slots[0].state is SlotState.SKIPPED and s.slots[0].result == "no_breakout"
+    assert (s.slots[0].ref.high, s.slots[0].ref.low) == (23639.20, 23609.20)
+    assert all(x.result != "started_after_slot" for x in s.slots if x.ref is not None)
+    assert s.status()["day"] == day.isoformat()

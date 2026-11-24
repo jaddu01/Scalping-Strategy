@@ -18,6 +18,9 @@
   {%- elif v.sl_risk %}<div class="small muted">risk {{ v.sl_risk }} pts</div>{% endif -%}
   {%- endif -%}
 {%- endmacro %}
+{% if closed %}
+  <div class="flash ok small">No trading today ({{ closed.reason }}).{% if closed.day %} Showing the last trading day, <b>{{ closed.day.strftime('%a %d %b') }}</b>.{% endif %}</div>
+{% endif %}
 {% if not rt %}
   <p class="muted">The instance is not running. Enable it to see today's slots.</p>
 {% elif rt.strategy.ce is defined %}

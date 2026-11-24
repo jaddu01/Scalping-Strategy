@@ -371,7 +371,7 @@ class Platform:
             self.trades.load_today()
             self.risk.reset_day()
             if not self.calendar.is_trading_day(d):
-                name = self.calendar.holiday_name(d) or "weekend"
+                name = self.calendar.closed_reason(d)
                 self.bus.emit(Category.MARKET, "NO_TRADING_TODAY", f"no trading today: {name}", holiday=name)
         trading = self.calendar.is_trading_day(d)
         if trading and m.daily_relogin <= t < m.market_open and self._once("relogin", d):

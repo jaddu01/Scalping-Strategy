@@ -100,6 +100,9 @@ class InstanceRuntime:
     def square_off_time(self) -> time:
         return self.p.settings.market.final_square_off
 
+    def is_trading_day(self, d: date) -> bool:
+        return self.p.calendar.is_trading_day(d)
+
     async def history(self, instrument: Instrument, timeframe_min: int, count: int) -> list[Candle]:
         return await self.p.market.history(instrument, timeframe_min, count)
 
@@ -349,7 +352,7 @@ class InstanceRuntime:
             self._set_status(STOPPING, "finishing current trade")
             return
         if not self.p.calendar.is_trading_day(now.date()):
-            self._set_status(WAITING, f"no trading today ({self.p.calendar.holiday_name(now.date()) or 'weekend'})")
+            self._set_status(WAITING, f"no trading today ({self.p.calendar.closed_reason(now.date())})")
             return
         if self.has_open_position():
             self._set_status(IN_TRADE)

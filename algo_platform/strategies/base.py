@@ -130,6 +130,10 @@ class StrategyContext(Protocol):
 
     def square_off_time(self) -> time: ...
 
+    def is_trading_day(self, d: date) -> bool:
+        """False on weekends and exchange holidays."""
+        ...
+
     def load_day_state(self, day: date) -> dict[str, Any]:
         """Strategy state saved earlier today (empty if none), so a restart can rebuild the day."""
         ...

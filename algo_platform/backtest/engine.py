@@ -164,6 +164,9 @@ class BacktestContext:
     def square_off_time(self) -> time:
         return self.cfg.square_off
 
+    def is_trading_day(self, d: date) -> bool:
+        return True  # a backtest only replays days that have candles
+
     def load_day_state(self, day: date) -> dict[str, Any]:
         return {}  # a backtest never restarts mid-day
 

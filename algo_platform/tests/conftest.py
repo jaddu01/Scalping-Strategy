@@ -87,6 +87,9 @@ class FakeStrategyContext:
     def square_off_time(self) -> time:
         return time(15, 15)
 
+    def is_trading_day(self, d: date) -> bool:
+        return d.weekday() < 5 and d not in getattr(self, "holidays", set())
+
     async def history(self, instrument: Instrument, timeframe_min: int, count: int) -> list[Candle]:
         return [c for c in self.history_candles if c.timeframe_min == timeframe_min][-count:]
 

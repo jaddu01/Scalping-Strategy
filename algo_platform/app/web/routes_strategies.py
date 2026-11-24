@@ -1,6 +1,7 @@
 """Strategy instances: list, create, clone, edit (schema-driven form), delete, detail view."""
 from __future__ import annotations
 
+from datetime import date as date_cls  # `date` is a query parameter name below
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -463,5 +464,12 @@ async def instance_slots(iid: int, request: Request, user: SessionInfo = Depends
                 totals["pnl"] += v["pnl"]
             totals["trades"] += 1
     totals = {k: round(v, 2) if isinstance(v, float) else v for k, v in totals.items()}
-    return render(request, "partials/slots.html", {"rt": snap, "views": views, "totals": totals})
+    closed = None  # weekend / holiday: the table shows the last trading day's slots
+    if p is not None:
+        today = p.clock.now().date()
+        if not p.calendar.is_trading_day(today):
+            shown = st.get("day")
+            closed = {"reason": p.calendar.closed_reason(today),
+                      "day": date_cls.fromisoformat(shown) if shown and shown != today.isoformat() else None}
+    return render(request, "partials/slots.html", {"rt": snap, "views": views, "totals": totals, "closed": closed})
 

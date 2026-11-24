@@ -460,9 +460,19 @@ class NiftyRefBreakout(Strategy):
     async def on_start(self) -> None:
         self.spot = self.ctx.resolve(self.spot_key)
         now = self.ctx.now()
-        self._build_day(now.date(), now)
+        self._build_day(self._show_day(now.date()), now)
         if self.settings.regime_filter != "off":
             await self._regime(Direction.CE_BUY)  # loads the shared candle history now, not at the first breakout
+
+    def _show_day(self, today: date) -> date:
+        """The day whose slots to build at start: today, or on a weekend / holiday the last trading day (rebuilt
+        from its saved state, display only: the timer does not run until the next session opens a new day)."""
+        d = today
+        for _ in range(15):
+            if self.ctx.is_trading_day(d):
+                return d
+            d -= timedelta(days=1)
+        return today
 
     async def _regime(self, direction: Direction) -> dict[str, Any] | None:
         """Sideways filter on the index's completed candles (None when off or unavailable)."""
