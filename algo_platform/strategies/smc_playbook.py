@@ -358,10 +358,14 @@ class SmcPlaybook(Strategy):
         hs, ls = self.trend_s.last_swings("H", 2), self.trend_s.last_swings("L", 2)
         if len(hs) < 2 or len(ls) < 2:
             return "none", None, None
+        # a trend-timeframe close beyond the last swing against the trend breaks the structure: no trades until new
+        # swings confirm (25-Nov-2026: a 500-point gap-up rally kept Monday's "bear" for hours, with price far above
+        # the whole dealing range, and every setup was a short; 40-day NIFTY backtest: same net, drawdown 62 K -> 41 K)
+        last = self.trend_s.bars[-1].close if self.trend_s.bars else None
         if hs[1] > hs[0] and ls[1] > ls[0]:
-            return "bull", hs[1], ls[1]
+            return ("side" if last is not None and last < ls[1] else "bull"), hs[1], ls[1]
         if hs[1] < hs[0] and ls[1] < ls[0]:
-            return "bear", hs[1], ls[1]
+            return ("side" if last is not None and last > hs[1] else "bear"), hs[1], ls[1]
         return "side", hs[1], ls[1]
 
     def _end(self, x: Setup, state: str, result: str) -> None:
