@@ -24,6 +24,7 @@ from engine.charges import option_charges
 from engine.exit_manager import (ExitState, evaluate_exit, evaluate_partial, runner_from_plan, runner_on_fill,
                                  runner_on_premium)
 from engine.market_data import series_of
+from engine.trades import _partial_plan
 from strategies.base import EntrySignal, Strategy, TradeInfo
 from strategies.registry import get_template
 
@@ -194,11 +195,8 @@ class BacktestContext:
                        exit_at=min(plan.exit_at, sq), square_off_at=sq, spot_sl=plan.spot_sl,
                        spot_sl_side=plan.spot_sl_side, tp_spot_level=plan.tp_spot_level, tp_spot_side=plan.tp_spot_side,
                        tp_premium_level=round(prem * (1 + plan.tp_premium_pct / 100), 2) if plan.tp_premium_pct else None,
-                       partials=[({"label": p.label, "basis": "premium", "level": round(prem * (1 + p.premium_pct / 100), 2),
-                                   "side": "above", "qty": p.lots * self.cfg.lot_size, "done": False}
-                                  if p.premium_pct is not None else
-                                  {"label": p.label, "basis": "spot", "level": p.spot_level, "side": p.side,
-                                   "qty": p.lots * self.cfg.lot_size, "done": False}) for p in plan.partial_targets],
+                       # the live engine's target plan: premium % and premium bands get their level from the fill
+                       partials=[_partial_plan(p, self.cfg.lot_size, prem) for p in plan.partial_targets],
                        runner=runner_from_plan(plan.runner, prem))
         trade = SimTrade(trade_id=tid, slot_id=signal.slot_id, day=self.now().date(), direction=signal.direction.value,
                          symbol=symbol, strike=signal.option.strike or 0.0, expiry=signal.option.expiry or self.now().date(),
