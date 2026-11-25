@@ -445,7 +445,8 @@ async def instance_slots(iid: int, request: Request, user: SessionInfo = Depends
                           "lot_size": t.lot_size, "entry_price": t.entry_price, "exit_price": t.exit_price,
                           "exit_trigger_spot": t.exit_trigger_spot, "gross_pnl": t.gross_pnl, "net_pnl": t.net_pnl,
                           "status": t.status, "exit_time": t.exit_time, "partials": (t.meta or {}).get("partials"),
-                          "spot_sl": t.spot_sl, "spot_sl_side": t.spot_sl_side, "exit_reason": t.exit_reason}
+                          "spot_sl": t.spot_sl, "spot_sl_side": t.spot_sl_side, "exit_reason": t.exit_reason,
+                          "tp_premium_level": t.tp_premium_level}
                     for ref, t in rows.items()}
         live_by_ref = {lt.ref: lt for lt in list(p.trades.live.values())} if p else {}
         for ref, tr in data.items():

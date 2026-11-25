@@ -52,7 +52,14 @@ def slot_trade_view(trade: dict[str, Any] | None, live: dict[str, Any] | None = 
     # the live trade's stop (a trailed stop has moved); distance only while the trade is open
     sl = sl_view(d, entry_spot, src.get("spot_sl"), src.get("spot_sl_side"), exit_spot if live_now else None)
     sl["sl_hit"] = (not is_open) and trade.get("exit_reason") in SL_REASONS
-    return {**sl, "entry_spot": entry_spot, "exit_spot": exit_spot, "points": points, "legs": legs,
+    # premium-% targets by label: {"tp1": {"level": 132.5, "filled": True}}; the last target is the trade's
+    # tp_premium_level (it closes the rest: "take_profit")
+    tps = {p["label"]: {"level": p.get("level"), "filled": bool(p.get("filled"))}
+           for p in trade.get("partials") or [] if p.get("basis") == "premium"}
+    if trade.get("tp_premium_level") is not None:
+        tps["final"] = {"level": trade["tp_premium_level"],
+                        "filled": (not is_open) and trade.get("exit_reason") == "take_profit"}
+    return {**sl, "tps": tps, "entry_spot": entry_spot, "exit_spot": exit_spot, "points": points, "legs": legs,
             "entry_premium": entry_prem, "exit_premium": exit_prem, "pnl": round(pnl, 2) if pnl is not None else None,
             "net": net, "live": live_now, "exit_time": trade.get("exit_time"),
             "status": trade.get("status")}

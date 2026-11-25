@@ -53,7 +53,11 @@
         <td class="num nowrap">{{ s.stop|money }}{% if s.be %} <span class="small muted">→ entry</span>{% endif %}<div class="small muted">risk {{ s.risk }}</div>{{ sl_live(v) }}</td>
         {% else %}<td class="num muted" title="stop-loss switched off: the opposite signal or 15:15 closes the trade">–</td>{% endif %}
         {% if rt.strategy.use_targets is not defined or rt.strategy.use_targets %}
+        {% if s.tp_pcts %}{% set vt = (v.tps if v else none) or {} %}
+        {% for k in tpk %}{% set t = vt.get(k) or (vt.get('final') if loop.last else none) %}<td class="num nowrap {{ 'pos' if t and t.filled else '' }}" title="option premium target: entry fill + {{ s.tp_pcts.get(k) }} %">+{{ '%g'|format(s.tp_pcts.get(k, 0)) }}%{% if t and t.filled %} ✓{% endif %}{% if t and t.level %}<div class="small muted">₹{{ t.level|money }}</div>{% endif %}</td>{% endfor %}
+        {% else %}
         {% for k in tpk %}<td class="num {{ 'pos' if k in hit else '' }}">{{ s.get(k)|money }}{% if k in hit %} ✓{% endif %}</td>{% endfor %}
+        {% endif %}
         {% else %}<td class="num muted" colspan="{{ tpk|length }}" title="targets switched off: all lots held to the opposite signal">held to opposite signal</td>{% endif %}
         <td><span class="badge {{ 'IN_TRADE' if s.state == 'IN_TRADE' else 'grey' }}">{{ s.state }}</span></td>
         <td class="num {{ v.points|pnlc if v else '' }}">{% if v and v.points is not none %}<b>{{ '%+.2f'|format(v.points) }}</b>{% elif v %}–{% endif %}</td>
