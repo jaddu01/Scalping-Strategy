@@ -154,3 +154,14 @@ async def test_restart_on_holiday_shows_last_trading_day():
     assert (s.slots[0].ref.high, s.slots[0].ref.low) == (23639.20, 23609.20)
     assert all(x.result != "started_after_slot" for x in s.slots if x.ref is not None)
     assert s.status()["day"] == day.isoformat()
+
+
+async def test_restart_with_a_slot_saved_without_reference_candle():
+    """25 Nov: the session started late, slot #1 was skipped (no_reference_candle) and saved without a candle;
+    the evening restart crashed rebuilding its triggers."""
+    ctx = FakeStrategyContext(start=at("09:40"))
+    ctx.day_state[at("09:40").date()] = {"slots": {REF[0]: {"state": "SKIPPED", "result": "no_reference_candle",
+                                                             "ref": None, "long_trigger": None, "short_trigger": None}}}
+    s = (await restart(ctx, "20:54")).slots[0]
+    assert s.state is SlotState.SKIPPED and s.result == "no_reference_candle" and s.ref is None
+    assert s.long_trigger is None

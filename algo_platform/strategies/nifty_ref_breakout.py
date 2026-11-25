@@ -428,7 +428,8 @@ class NiftyRefBreakout(Strategy):
                 s.long_trigger, s.short_trigger = sv.get("long_trigger"), sv.get("short_trigger")
             if sv:
                 s.regime = sv.get("regime")
-                if s.long_trigger is None or s.short_trigger is None:
+                # a slot saved without a reference candle (e.g. skipped: no_reference_candle) has no triggers
+                if s.ref is not None and (s.long_trigger is None or s.short_trigger is None):
                     s.long_trigger, s.short_trigger = triggers(s.ref.high, s.ref.low, self.settings.buffer_points)
             if s.slot_id in self._restored:
                 info = self._restored[s.slot_id]
