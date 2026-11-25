@@ -27,7 +27,8 @@ from engine.market_data import series_of
 from strategies.base import EntrySignal, Strategy, TradeInfo
 from strategies.registry import get_template
 
-WARMUP_DAYS = 5  # earlier trading days a backtest day can read through ctx.history()
+WARMUP_DAYS = 5  # earlier trading days a backtest day can read through ctx.history() (at least; a strategy's
+# own `warmup_days` can ask for more, e.g. the Lorentzian kNN needs ~2000 candles)
 
 
 def spot_instrument(underlying: str = "NIFTY", exchange: str = "NSE") -> Instrument:
@@ -372,7 +373,8 @@ async def run_backtest(cfg: BacktestConfig, candles: list[Candle]) -> dict[str, 
     tf_list = []
     for day, bars in sorted(by_day.items()):
         clock = FakeClock(combine(day, time(9, 14)))
-        prior = [c for d in sorted(history_days)[-WARMUP_DAYS:] for c in history_days[d]]
+        prior = [c for d in sorted(history_days)[-max(WARMUP_DAYS, getattr(cls, 'warmup_days', 0)):]
+                 for c in history_days[d]]
         ctx = BacktestContext(cfg, bars, clock, prior)
         history_days[day] = bars
         strat = cls(settings, ctx)  # type: ignore[arg-type]

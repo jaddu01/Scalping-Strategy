@@ -30,7 +30,7 @@ def _load_builtin() -> None:
         _builtin_loaded = True
         from strategies import (breakout_tp, ema_rsi_breakout, nifty_early_breakout,  # noqa: F401
                                 nifty_ref_breakout, nifty_two_entry, smc_playbook,  # (register themselves)
-                                chandelier_exit)
+                                chandelier_exit, lorentzian_ml)
 
 
 def get_template(template_id: str) -> type[Strategy]:

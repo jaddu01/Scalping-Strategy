@@ -23,14 +23,24 @@
 {% endif %}
 {% if not rt %}
   <p class="muted">The instance is not running. Enable it to see today's slots.</p>
-{% elif rt.strategy.ce is defined %}
-  {% set m = rt.strategy.ce %}
+{% elif rt.strategy.ce is defined or rt.strategy.ml is defined %}
   {% if rt.strategy.pending_settings %}<div class="flash ok small">New parameters are queued and will apply when no trade is open.</div>{% endif %}
+  {% if rt.strategy.ml is defined %}
+  {% set m = rt.strategy.ml %}
+  {% if rt.strategy.cold %}<div class="flash err small">Waiting for history: no signals until the model has its candles (retrying).</div>{% endif %}
+  <p class="small muted">Lorentzian kNN ({{ m.tf }}m): prediction <b class="{{ 'pos' if m.prediction > 0 else ('neg' if m.prediction < 0 else '') }}">{{ '%+d'|format(m.prediction) }}</b>
+    · signal <span class="badge {{ 'pos' if m.signal > 0 else ('neg' if m.signal < 0 else 'grey') }}">{{ 'LONG' if m.signal > 0 else ('SHORT' if m.signal < 0 else '–') }}</span>
+    · kernel {{ 'rising' if m.kernel_bull else ('falling' if m.kernel_bull is sameas false else '–') }} · EMA {{ m.ema|money }} · supertrend {{ m.supertrend|money }}
+    · last candle {{ m.candle or '–' }} close {{ m.close|money }} · {{ m.rows }} rows</p>
+  {% set tpk = rt.strategy.tp_labels %}
+  {% else %}
+  {% set m = rt.strategy.ce %}
   {% if rt.strategy.cold %}<div class="flash err small">Waiting for history: no signals until the Chandelier lines match the chart (retrying).</div>{% endif %}
   <p class="small muted">Chandelier ({{ m.tf }}m): <span class="badge {{ 'pos' if m.direction == 'long' else ('neg' if m.direction == 'short' else 'grey') }}">{{ (m.direction or '–')|upper }}</span>
     · long stop {{ m.long_stop|money }} · short stop {{ m.short_stop|money }} · last candle {{ m.candle or '–' }} close {{ m.close|money }}</p>
   {% set tpk = rt.strategy.tp_labels or ['tp1', 'tp2', 'tp3'] %}
-  {% if not rt.strategy.ce_signals %}<p class="muted">No Chandelier signal yet today.</p>{% else %}
+  {% endif %}
+  {% if not rt.strategy.ce_signals %}<p class="muted">No signal yet today.</p>{% else %}
   <table class="slots cards-sm">
     <thead><tr><th class="c-title">#</th><th>Signal</th><th>Dir</th><th class="num">Entry</th><th class="num">SL</th>{% for k in tpk %}<th class="num">{{ k|upper }}</th>{% endfor %}
       <th>State</th><th class="num" title="index points in the trade's favour, lot-weighted">Points</th><th class="num">Premium</th><th class="num">P&amp;L</th><th>Trade</th><th>Result</th><th title="sideways filter at the entry">Regime</th></tr></thead>
