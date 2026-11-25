@@ -14,7 +14,9 @@ Exits (spot levels, watched on every tick by the engine):
   TP4 / TP5  optional (0 lots = off): with lots set, TP3 (and TP4) sell their lots and the LAST TP that has lots
              closes the remaining lots (e.g. 3/2/2/2/1 at 2/3/4/5/6 R)
   optional   stop to the entry price once TP1 is reached (`move_sl_to_entry_after_tp1`)
-  risk filter skip the signal when R < `min_risk_points` or R > `max_risk_points` (0 = off; only with the stop on)
+  risk filter R < `min_risk_points` or R > `max_risk_points` (0 = off; needs the stop or the targets on):
+             `risk_filter_action` skip = no trade · cap_targets = trade, the TPs measured from R clamped to the
+             limits (the stop stays at the previous candle)
   opposite   an opposite signal closes what is left and opens the new direction once flat (`exit_on_opposite`)
   hard exit  the 15:15 square-off
 Switches (both on = the Multi-TP script; both off = the original Chandelier_Exit.pine, stop-and-reverse):
@@ -23,7 +25,9 @@ Switches (both on = the Multi-TP script; both off = the original Chandelier_Exit
   (45-day NIFTY study, ATR 7 x 2: both on +1.08 lakh, both off +2.91 lakh, estimated)
 Platform additions: new entries `entry_start`-`entry_end`; `skip_first_candle` ignores signals of the day's first
 candle (its "previous candle" is yesterday's last one, so the stop can be 100+ points away: in a 45-day NIFTY study
-those 25 trades averaged a 117-point stop and lost); one position at a time; sideways filter (log-only by default).
+those 25 trades averaged a 117-point stop and lost) — also a strategy's first candle of the day when the session
+started late (its previous candle is then yesterday's); a signal whose previous candle is missing (feed gap) is
+skipped; one position at a time; sideways filter (log-only by default).
 """
 from __future__ import annotations
 
@@ -94,6 +98,10 @@ class ChandelierSettings(RegimeSettings):
     max_risk_points: float = Field(0.0, ge=0, le=1000, title="Skip if risk above (points, 0 = off)",
                                    description="A wide SL loses the most and rarely reaches the TPs (53-day NIFTY "
                                                "study: skipping R > 50 lifted net and halved the drawdown)")
+    risk_filter_action: Literal["skip", "cap_targets"] = Field(
+        "skip", title="Risk outside the limits",
+        description="skip: no trade · cap_targets: take the trade and measure the TPs from R clamped to the limits "
+                    "(R 390 with 'above 50' -> TP1 at 1 × 50 points); the stop stays at the previous candle")
     exit_on_opposite: bool = Field(True, title="Close remaining lots on the opposite signal",
                                    description="…and take the new direction as soon as the exit has filled")
     # --- platform rules
@@ -437,26 +445,33 @@ class ChandelierExit(Strategy):
         stop = round(prev.low - s.sl_buffer_points if long else prev.high + s.sl_buffer_points, 2)
         risk = (c.close - stop) if long else (stop - c.close)
         sg = 1 if long else -1
+        filt = s.use_stop_loss or s.use_targets  # the risk filter (R means nothing with both off)
+        low = filt and s.min_risk_points and 0 < risk < s.min_risk_points
+        high = filt and s.max_risk_points and risk > s.max_risk_points
+        cap = s.risk_filter_action == "cap_targets" and (low or high)
+        tr = (s.min_risk_points if low else s.max_risk_points) if cap else risk  # R the TPs are measured from
         x = Signal(no=len(self.signals) + 1, side="CE_BUY" if long else "PE_BUY", candle_start=c.start,
                    entry=round(c.close, 2), stop=stop, risk=round(risk, 2),
-                   tp1=round(c.close + sg * s.tp1_rr * risk, 2), tp2=round(c.close + sg * s.tp2_rr * risk, 2),
-                   tp3=round(c.close + sg * s.tp3_rr * risk, 2),
-                   tp4=round(c.close + sg * s.tp4_rr * risk, 2) if s.tp4_lots else None,
-                   tp5=round(c.close + sg * s.tp5_rr * risk, 2) if s.tp5_lots else None)
+                   tp1=round(c.close + sg * s.tp1_rr * tr, 2), tp2=round(c.close + sg * s.tp2_rr * tr, 2),
+                   tp3=round(c.close + sg * s.tp3_rr * tr, 2),
+                   tp4=round(c.close + sg * s.tp4_rr * tr, 2) if s.tp4_lots else None,
+                   tp5=round(c.close + sg * s.tp5_rr * tr, 2) if s.tp5_lots else None)
         self.signals.append(x)
         day_open = combine(c.start.date(), MARKET_OPEN)
         reason = None
         if not (s.allow_long if long else s.allow_short):
             reason = "direction_off"
-        elif s.skip_first_candle and c.start <= day_open:
-            reason = "first_candle"
+        elif s.skip_first_candle and (c.start <= day_open or prev.start.date() != c.start.date()):
+            reason = "first_candle"  # also the first candle seen after a late start: its stop is yesterday's
+        elif prev.start.date() == c.start.date() and prev.start + timedelta(minutes=s.candle_timeframe_min) < c.start:
+            reason = "previous_candle_missing"  # feed gap: the stop would be an older candle's
         elif not (combine(close_time.date(), s.entry_start) <= close_time <= combine(close_time.date(), s.entry_end)):
             reason = "outside_entry_window"
         elif risk <= 0 and (s.use_stop_loss or s.use_targets):
             reason = "no_risk"  # the close is beyond the previous candle's extreme (as the script skips)
-        elif s.use_stop_loss and s.min_risk_points and risk < s.min_risk_points:
+        elif low and not cap:
             reason = "risk_below_min"
-        elif s.use_stop_loss and s.max_risk_points and risk > s.max_risk_points:
+        elif high and not cap:
             reason = "risk_above_max"
         if reason in ("risk_below_min", "risk_above_max"):
             lim = s.min_risk_points if reason == "risk_below_min" else s.max_risk_points
@@ -466,6 +481,9 @@ class ChandelierExit(Strategy):
         if reason:
             x.state, x.result = "SKIPPED", reason
             return None
+        if cap:
+            self._emit("RISK_CAPPED", f"#{x.no} {x.side}: risk {risk:.2f} pts is {'below' if low else 'above'} "
+                                      f"{tr:g}; TPs measured from {tr:g} pts", Level.WARNING, setup=x.no)
         x.regime = regime_of(s, self.lines.candles, x.side) if s.regime_filter != "off" else None
         if blocks(s, x.regime):
             x.state, x.result = "SKIPPED", "sideways"
