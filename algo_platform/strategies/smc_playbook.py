@@ -28,6 +28,13 @@ Long (BUY the ATM CE); short (BUY the ATM PE) is the exact mirror:
  12 management    `breakeven_at_1r`: once spot reaches +1R the stop moves to entry + `breakeven_lock_r` x risk
                   (0 = exactly the entry price; never widened);
                   `partial_lots_at_1r`: optionally sell that many lots at +1R
+ 13 multi TP      `tp_mode` = multi_r (reversal trades; off by default): sell `tp1_lots` at `tp1_rr` x R and `tp2_lots`
+                  at `tp2_rr` x R; the lots left are the runner, which exits by `runner_exit`:
+                    trail_15m       once TP2 is reached the stop follows the trend timeframe's swing lows (highs),
+                                    minus the stop buffer, only tightening (as continuation trades); 15:15 at the latest
+                    target          at `runner_rr` x R
+                    breakeven_only  no target: the +1R breakeven stop (or the step floor) or 15:15
+                  `runner_step_floor`: once TP2 is reached the stop jumps to TP1's level (never loosened)
 Continuation entries (`entry_model` = reversal_continuation, off by default) catch one-way trend days, where the
 price stays in PREMIUM (long) and never sweeps a low. Long (short mirrors):
   c1 trend + place  bullish trend, the close above the equilibrium but at most `cont_max_stretch_atr` x the trend
@@ -105,6 +112,21 @@ class SmcSettings(RegimeSettings):
                                     description="At +1R the stop moves to entry + x × risk instead of exactly entry; "
                                                 "0.3 kept ~Rs 21k more over 46 days without cutting a 2R winner")
     partial_lots_at_1r: int = Field(0, ge=0, le=200, title="Sell lots at +1R (0 = off)")
+    tp_mode: Literal["single", "multi_r"] = Field(
+        "single", title="Take-profit mode (reversal trades)",
+        description="single: all lots at the Target (× risk) · multi_r: TP1 lots at TP1 × R, TP2 lots at TP2 × R, "
+                    "the rest is a runner (Runner exit below). Continuation trades keep their own exit")
+    tp1_rr: float = Field(1.0, ge=0.3, le=10, title="TP1 (× risk)")
+    tp1_lots: int = Field(2, ge=0, le=200, title="TP1 lots")
+    tp2_rr: float = Field(2.0, ge=0.5, le=20, title="TP2 (× risk)")
+    tp2_lots: int = Field(2, ge=0, le=200, title="TP2 lots",
+                          description="Lots − TP1 lots − TP2 lots = the runner (at least 1)")
+    runner_exit: Literal["trail_15m", "target", "breakeven_only"] = Field(
+        "trail_15m", title="Runner exit",
+        description="trail_15m: after TP2 the stop follows the trend timeframe's swings · target: at Runner target "
+                    "(× risk) · breakeven_only: the +1R breakeven stop or 15:15")
+    runner_rr: float = Field(4.0, ge=0.5, le=50, title="Runner target (× risk)", description="Runner exit = target only")
+    runner_step_floor: bool = Field(True, title="Runner: stop to TP1 once TP2 is reached")
     max_stop_atr: float = Field(0, ge=0, le=100, title="Skip if stop is wider than x × ATR (0 = off)",
                                 description="Very wide stops are expensive for option buying")
     use_prev_day_levels: bool = Field(True, title="Liquidity: previous day high / low")
@@ -170,6 +192,16 @@ class SmcSettings(RegimeSettings):
             raise ValueError("entry window must be inside market hours 09:15-15:30, start before end")
         if self.partial_lots_at_1r >= self.lots:
             raise ValueError("lots sold at +1R must be fewer than Lots")
+        if self.tp_mode == "multi_r":
+            if self.partial_lots_at_1r:
+                raise ValueError("multi_r take-profits: set 'Sell lots at +1R' to 0 (TP1 replaces it)")
+            if not self.tp1_rr < self.tp2_rr:
+                raise ValueError("multi_r take-profits: TP1 must be below TP2")
+            if self.tp1_lots + self.tp2_lots >= self.lots:
+                raise ValueError(f"multi_r take-profits: TP1 + TP2 lots ({self.tp1_lots + self.tp2_lots}) must be fewer "
+                                 f"than Lots ({self.lots}) so at least one lot is the runner")
+            if self.runner_exit == "target" and self.runner_rr <= self.tp2_rr:
+                raise ValueError("multi_r take-profits: the runner target must be beyond TP2")
         if self.strike_step == 0 and self.underlying not in STRIKE_STEP:
             raise ValueError(f"no automatic strike step for {self.underlying}: set Strike step")
         if self.entry_model == "reversal_continuation" and not (self.cont_start < self.cont_end):
@@ -227,6 +259,9 @@ class Setup:
     entry_time: datetime | None = None
     regime: dict[str, Any] | None = None
     touch_n: int | None = None  # continuation: the candle that last touched the zone
+    tp1: float | None = None  # multi_r take-profits (spot)
+    tp2: float | None = None
+    runner_on: bool = False  # TP2 reached: the runner's exit rules apply
 
     @property
     def long(self) -> bool:
@@ -259,6 +294,7 @@ class Setup:
                 "mss_level": round(self.ref_swing, 2),
                 "zone": (f"{self.zone_kind} {self.zone_lo:.2f}–{self.zone_hi:.2f}" if self.zone_kind else None),
                 "entry": self.entry_spot, "stop": self.stop, "target": self.target, "be": self.be_moved,
+                "tp1": self.tp1, "tp2": self.tp2, "runner": self.runner_on,
                 "entry_time": fmt_hm(self.entry_time) if self.entry_time else None,
                 "trade_id": self.trade_id, "result": self.result,
                 "regime": (self.regime or {}).get("note"), "regime_block": bool((self.regime or {}).get("would_block"))}
@@ -693,10 +729,14 @@ class SmcPlaybook(Strategy):
                     await self._enter(x, b, close_time)
 
     def _cont_trail(self) -> None:
-        """Continuation trade, trail_15m exit: the stop follows the latest trend-timeframe swing low (high) minus the
-        stop buffer; it only tightens (the engine refuses anything else too)."""
+        """Continuation trade (trail_15m exit) or a multi_r runner after TP2 (runner_exit trail_15m): the stop follows
+        the latest trend-timeframe swing low (high) minus the stop buffer; it only tightens (the engine too)."""
         s, a = self.settings, self.active
-        if a is None or not a.continuation or a.state != "IN_TRADE" or not a.trade_id or s.cont_exit != "trail_15m":
+        if a is None or a.state != "IN_TRADE" or not a.trade_id:
+            return
+        cont = a.continuation and s.cont_exit == "trail_15m"
+        runner = (not a.continuation and a.tp2 is not None and a.runner_on and s.runner_exit == "trail_15m")
+        if not (cont or runner):
             return
         sw = [x for x in self.trend_s.swings if x[3] == ("L" if a.long else "H")]
         atr = self.entry.atr_value or a.atr
@@ -707,7 +747,8 @@ class SmcPlaybook(Strategy):
         if (cand >= a.stop + TRAIL_MIN_STEP) if a.long else (cand <= a.stop - TRAIL_MIN_STEP):
             old, a.stop = a.stop, cand
             self.ctx.tighten_stop(a.trade_id, cand)
-            self._emit("TRAIL", f"#{a.no} continuation stop {old:.2f} -> {cand:.2f} ({s.trend_timeframe_min}m swing "
+            self._emit("TRAIL", f"#{a.no} {'continuation' if cont else 'runner'} stop {old:.2f} -> {cand:.2f} "
+                                f"({s.trend_timeframe_min}m swing "
                                 f"{sw[-1][2]:.2f})", setup=a.no, old=old, new=cand)
 
     async def _enter(self, x: Setup, b: Bar, close_time: datetime) -> None:
@@ -754,6 +795,12 @@ class SmcPlaybook(Strategy):
         trailed = x.continuation and s.cont_exit == "trail_15m"
         if trailed:
             x.target = None  # no target: the trend timeframe's swings trail the stop
+        multi = s.tp_mode == "multi_r" and not x.continuation
+        if multi:
+            x.tp1, x.tp2 = round(spot + sg * s.tp1_rr * risk, 2), round(spot + sg * s.tp2_rr * risk, 2)
+            partial = [PartialTarget(lbl, lvl, side, n) for lbl, lvl, n in
+                       (("tp1", x.tp1, s.tp1_lots), ("tp2", x.tp2, s.tp2_lots)) if n > 0]
+            x.target = round(spot + sg * s.runner_rr * risk, 2) if s.runner_exit == "target" else None
         signal = EntrySignal(
             slot_id=x.slot_id, direction=d,
             option=InstrumentKey(underlying=s.underlying, exchange=opt_exch,
@@ -771,8 +818,13 @@ class SmcPlaybook(Strategy):
         )
         self._emit("SETUP", f"ENTRY #{x.no} {x.side}{' continuation' if x.continuation else ''} {x.zone_kind} "
                             f"{x.zone_lo:.2f}-{x.zone_hi:.2f} spot={spot:.2f} SL={stop:.2f} ({risk:.1f} pts, "
-                            f"{risk / atr:.1f} ATR) " + (f"target={x.target:.2f}" if x.target is not None else
-                                                         f"no target (trailed on {s.trend_timeframe_min}m swings)")
+                            f"{risk / atr:.1f} ATR) "
+                   + (f"TP1={x.tp1:.2f} ({s.tp1_lots}) TP2={x.tp2:.2f} ({s.tp2_lots}) runner "
+                      f"{s.lots - s.tp1_lots - s.tp2_lots} lot(s): "
+                      + (f"target {x.target:.2f}" if x.target is not None else s.runner_exit.replace('_', ' ')) + " "
+                      if multi else "")
+                   + ("" if multi else (f"target={x.target:.2f}" if x.target is not None else
+                                        f"no target (trailed on {s.trend_timeframe_min}m swings)"))
                    + f" +1R={x.one_r:.2f}" + (f" regime={x.regime['note']}" if x.regime else ""), setup=x.no)
         info = await self.ctx.submit_entry(signal)
         if info is None:
@@ -787,24 +839,40 @@ class SmcPlaybook(Strategy):
                     self._end(o, "CANCELLED", "position_taken")
         self._persist()
 
-    # ---- ticks: breakeven at +1R
+    # ---- ticks: breakeven at +1R, the multi_r runner after TP2
+    def _move_stop(self, a: Setup, level: float) -> bool:
+        """Tighten the trade's spot stop (never loosens) and keep the setup's stop in step with it."""
+        if a.stop is not None and ((level <= a.stop) if a.long else (level >= a.stop)):
+            return False
+        a.stop = level
+        self.ctx.tighten_stop(a.trade_id, level)  # type: ignore[arg-type]
+        return True
+
     async def on_tick(self, tick: Tick) -> None:
         if self.spot is None or tick.token != self.spot.token:
             return
         a = self.active
-        if a is None or a.state != "IN_TRADE" or not a.trade_id or a.be_moved or not self.settings.breakeven_at_1r:
+        if a is None or a.state != "IN_TRADE" or not a.trade_id or a.entry_spot is None:
             return
-        if a.continuation and not self.settings.cont_breakeven:
-            return
-        if a.one_r is None or a.entry_spot is None:
-            return
-        if (tick.ltp >= a.one_r) if a.long else (tick.ltp <= a.one_r):
+        s, p = self.settings, tick.ltp
+        if (not a.be_moved and s.breakeven_at_1r and (not a.continuation or s.cont_breakeven) and a.one_r is not None
+                and ((p >= a.one_r) if a.long else (p <= a.one_r))):
             a.be_moved = True
-            lock = self.settings.breakeven_lock_r
+            lock = s.breakeven_lock_r
             stop = round(a.entry_spot + (a.one_r - a.entry_spot) * lock, 2)
-            self.ctx.tighten_stop(a.trade_id, stop)
+            self._move_stop(a, stop)
             what = f"entry + {lock:g}R = {stop:.2f}" if lock else f"entry {stop:.2f}"
-            self._emit("BREAKEVEN", f"#{a.no} spot {tick.ltp:.2f} reached +1R: stop moved to {what}", setup=a.no)
+            self._emit("BREAKEVEN", f"#{a.no} spot {p:.2f} reached +1R: stop moved to {what}", setup=a.no)
+            self._persist()
+        if (a.tp2 is not None and not a.runner_on and not a.continuation
+                and ((p >= a.tp2) if a.long else (p <= a.tp2))):
+            a.runner_on = True
+            note = ""
+            if s.runner_step_floor and a.tp1 is not None and self._move_stop(a, a.tp1):
+                note = f"; stop moved to TP1 {a.tp1:.2f}"
+            self._emit("RUNNER", f"#{a.no} spot {p:.2f} reached TP2 {a.tp2:.2f}: runner "
+                                 f"{s.lots - s.tp1_lots - s.tp2_lots} lot(s), exit {s.runner_exit.replace('_', ' ')}"
+                                 + note, setup=a.no)
             self._persist()
 
     async def on_trade_update(self, trade: TradeInfo) -> None:
