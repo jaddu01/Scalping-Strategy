@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import secrets
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -91,7 +92,13 @@ async def login_page(request: Request) -> Response:
 
 
 def _safe_next(nxt: str) -> str:
-    return nxt if nxt.startswith("/") and not nxt.startswith("//") else "/"
+    """Only a local path: no scheme / host, no '//' or '/\\' (browsers read both as another host), no control
+    characters or backslashes anywhere (open-redirect hardening)."""
+    nxt = nxt or "/"
+    if (not nxt.startswith("/") or nxt.startswith(("//", "/\\")) or "\\" in nxt
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in nxt)):
+        return "/"
+    return nxt
 
 
 @router.post("/login")
@@ -100,7 +107,7 @@ async def login_submit(request: Request, username: str = Form(...), password: st
     try:
         _check_preauth(request, csrf_token)
     except _StaleForm:
-        return redirect(f"/login?next={_safe_next(next)}", err="The sign-in page expired — please sign in again")
+        return redirect(f"/login?next={quote(_safe_next(next), safe='/')}", err="The sign-in page expired — please sign in again")
     ip = client_ip(request)
     db = request.app.state.db
 
@@ -134,7 +141,7 @@ async def login_submit(request: Request, username: str = Form(...), password: st
     sessions = request.app.state.sessions
     token = sessions.create(user, ip, request.headers.get("user-agent"), pending_2fa=user.totp_enabled)
     if user.totp_enabled:
-        resp = RedirectResponse(f"/login/totp?next={_safe_next(next)}", status_code=303)
+        resp = RedirectResponse(f"/login/totp?next={quote(_safe_next(next), safe='/')}", status_code=303)
     else:
         sec.register_success(db, user.id)
         _throttle.reset(ip)

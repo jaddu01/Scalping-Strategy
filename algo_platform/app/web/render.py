@@ -30,6 +30,13 @@ NAV = [
 ]
 
 
+def safe_json(data: Any) -> str:
+    """JSON for a <script type="application/json"> block: '<', '>' and '&' as \\u escapes, so a name such as
+    '</script><img onerror=...>' typed into a strategy or account can never close the block (stored XSS)."""
+    return (json.dumps(data, default=str).replace("<", "\\u003c").replace(">", "\\u003e")
+            .replace("&", "\\u0026"))
+
+
 def _fmt_dt(v: Any, fmt: str = "%d-%b %H:%M:%S") -> str:
     if v is None or v == "":
         return "–"

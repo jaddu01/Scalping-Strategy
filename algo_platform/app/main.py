@@ -57,7 +57,7 @@ def create_app(config: AppConfig | None = None, *, start_engine: bool | None = N
     async def security_headers(request: Request, call_next):  # type: ignore[no-untyped-def]
         path = request.url.path
         if (not path.startswith("/static") and path not in ("/setup", "/healthz") and hasattr(request.app.state, "db")
-                and not getattr(request.app.state, "has_users", False)):
+                and path not in ("/robots.txt", "/favicon.ico") and not getattr(request.app.state, "has_users", False)):
             if user_count(request.app.state.db) == 0:
                 return RedirectResponse("/setup", status_code=303)
             request.app.state.has_users = True
@@ -103,6 +103,14 @@ def create_app(config: AppConfig | None = None, *, start_engine: bool | None = N
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/robots.txt", include_in_schema=False)
+    async def robots() -> Response:
+        return Response("User-agent: *\nDisallow: /\n", media_type="text/plain")  # a private app: no indexing
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> Response:
+        return Response(status_code=204)  # no icon; avoids a 404 on every page load
 
     from app.api import admin_data
     from app.api import routes as api_routes
